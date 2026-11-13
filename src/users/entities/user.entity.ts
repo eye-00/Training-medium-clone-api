@@ -58,5 +58,5 @@ export class User {
         default: () => 'CURRENT_TIMESTAMP(6)',
         onUpdate: 'CURRENT_TIMESTAMP(6)',
     })
-    updateAt!: Date;
+    updatedAt!: Date;
 }

@@ -15,6 +15,8 @@ import { envSchema, type DatabaseEnv } from './config/env.schema.js';
 import { createDatabaseOptions } from './database/database.options.js';
 import { RedisModule } from './redis/redis.module.js';
 import { ConfigModule, ConfigService } from '@nestjs/config'
+
+import { UsersModule } from './users/users.module.js';
 @Module({
   imports: [
     ConfigModule.forRoot({
@@ -44,11 +46,16 @@ import { ConfigModule, ConfigService } from '@nestjs/config'
           DB_PASSWORD: config.getOrThrow<string>('DB_PASSWORD'),
           DB_DATABASE: config.getOrThrow<string>('DB_DATABASE'),
         };
-        return createDatabaseOptions(databaseConfig);
+        return {
+          ...createDatabaseOptions(databaseConfig),
+          autoLoadEntities: true,
+        }
       },
     }),
 
     RedisModule,
+    UsersModule,
+
   ],
   controllers: [AppController],
   providers: [AppService],
