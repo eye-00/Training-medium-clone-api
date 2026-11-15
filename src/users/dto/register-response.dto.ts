@@ -16,7 +16,7 @@ export class PublicUserDto {
     image!: string | null;
 }
 
-export class RegisterRespondDto {
+export class RegisterResponseDto {
     @ApiProperty({ type: () => PublicUserDto })
     user!: PublicUserDto;
 }

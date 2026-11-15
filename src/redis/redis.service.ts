@@ -3,6 +3,7 @@ import {
     Logger,
     OnModuleDestroy,
     OnModuleInit,
+    ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createClient } from 'redis';
@@ -15,6 +16,7 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     constructor(private readonly config: ConfigService) {
         this.client = createClient({
             url: this.config.getOrThrow<string>('REDIS_URL'),
+            disableOfflineQueue: true,
             socket: {
                 reconnectStrategy: (retries) => {
                     const delay = Math.min(100 * 2 ** Math.min(retries, 5), 3000);
@@ -39,4 +41,25 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     async ping(): Promise<string> {
         return this.client.ping();
     }
+
+    async isTokenRevoked(jti: string): Promise<boolean> {
+        if (!this.client.isReady) {
+            throw new ServiceUnavailableException(
+                'Authentication service temporarily unavailable',
+            );
+        }
+
+        try {
+            const exists = await this.client.exists(
+                `auth:blacklist:${jti}`,
+            );
+
+            return exists === 1;
+        } catch {
+            throw new ServiceUnavailableException(
+                'Authentication service temporarily unavailable',
+            );
+        }
+    }
+
 }

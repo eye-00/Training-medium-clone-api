@@ -15,6 +15,7 @@ async function bootstrap() {
     .setTitle('Medium Clone API')
     .setDescription('Backend API document for the Medium Clone tutorial project',)
     .setVersion('1.0.0')
+    .addBearerAuth()
     .build();
 
   const documentFactory = () => SwaggerModule.createDocument(app, swaggerConfig);

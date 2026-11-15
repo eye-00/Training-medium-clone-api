@@ -4,7 +4,9 @@ import { JwtModule } from "@nestjs/jwt";
 import { AuthController } from "./auth.controller.js";
 import { AuthService } from "./auth.service.js";
 import { ConfigModule, ConfigService } from "@nestjs/config";
-
+import { RedisModule } from "../redis/redis.module.js";
+import { CurrentUserController } from "./current-user.controller.js";
+import { JwtAuthGuard } from "./guards/jwt-auth.guard.js";
 @Module({
     imports: [
         UsersModule,
@@ -19,9 +21,10 @@ import { ConfigModule, ConfigService } from "@nestjs/config";
                 }
             }),
         }),
+        RedisModule,
     ],
-    controllers: [AuthController],
-    providers: [AuthService],
+    controllers: [AuthController, CurrentUserController],
+    providers: [AuthService, JwtAuthGuard],
     exports: [AuthService, JwtModule],
 })
 

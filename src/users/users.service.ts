@@ -10,7 +10,8 @@ import { QueryFailedError, type Repository } from 'typeorm';
 
 import { User } from './entities/user.entity.js';
 import { RegisterUserDto } from './dto/register-user.dto.js';
-import { RegisterRespondDto } from './dto/register-response.dto.js';
+import { RegisterResponseDto } from './dto/register-response.dto.js';
+import { PublicUserDto } from './dto/register-response.dto.js';
 
 @Injectable()
 export class UsersService {
@@ -20,7 +21,7 @@ export class UsersService {
     ) { }
     async register(
         dto: RegisterUserDto,
-    ): Promise<RegisterRespondDto> {
+    ): Promise<RegisterResponseDto> {
         const email = dto.email.trim().toLowerCase();
         const username = dto.username.trim();
         if (Buffer.byteLength(dto.password, 'utf8') > 72) {
@@ -63,9 +64,26 @@ export class UsersService {
     };
     async findByEmailForAuth(email: string): Promise<User | null> {
         return this.usersRepository
-        .createQueryBuilder('user')
-        .addSelect('user.passwordHash')
-        .where('user.email = :email', { email: email.trim().toLowerCase() })
-        .getOne();
+            .createQueryBuilder('user')
+            .addSelect('user.passwordHash')
+            .where('user.email = :email', { email: email.trim().toLowerCase() })
+            .getOne();
     }
+
+    async findPublicById(id: string): Promise<PublicUserDto | null> {
+        const user = await this.usersRepository.findOneBy({ id });
+
+        if (!user) {
+            return null;
+        }
+
+        return {
+            id: user.id,
+            email: user.email,
+            username: user.username,
+            bio: user.bio,
+            image: user.image,
+        };
+    }
+
 }
