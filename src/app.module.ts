@@ -17,6 +17,7 @@ import { RedisModule } from './redis/redis.module.js';
 import { ConfigModule, ConfigService } from '@nestjs/config'
 
 import { UsersModule } from './users/users.module.js';
+import { AuthModule } from './auth/auth.module.js';
 @Module({
   imports: [
     ConfigModule.forRoot({
@@ -55,6 +56,7 @@ import { UsersModule } from './users/users.module.js';
 
     RedisModule,
     UsersModule,
+    AuthModule,
 
   ],
   controllers: [AppController],

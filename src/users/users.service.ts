@@ -61,4 +61,11 @@ export class UsersService {
             }
         }
     };
+    async findByEmailForAuth(email: string): Promise<User | null> {
+        return this.usersRepository
+        .createQueryBuilder('user')
+        .addSelect('user.passwordHash')
+        .where('user.email = :email', { email: email.trim().toLowerCase() })
+        .getOne();
+    }
 }

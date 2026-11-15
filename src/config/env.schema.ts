@@ -21,6 +21,7 @@ export const envSchema = databaseEnvSchema
     .default(3000),
 
     REDIS_URL: z.string().url(),
+    JWT_SECRET: z.string().min(32),
 })
 .passthrough();
 export type DatabaseEnv = z.infer<typeof databaseEnvSchema>;
