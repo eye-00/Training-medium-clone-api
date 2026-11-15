@@ -100,6 +100,7 @@ export class JwtAuthGuard implements CanActivate {
         }
 
         request.user = user;
+        request.auth = payload;
 
         return true;
     }

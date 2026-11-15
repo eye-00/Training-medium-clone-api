@@ -94,6 +94,7 @@ describe('JwtAuthGuard', () => {
         expect(isTokenRevoked).toHaveBeenCalledWith(payload.jti);
         expect(findPublicById).toHaveBeenCalledWith(payload.sub);
         expect(request.user).toEqual(publicUser);
+        expect(request).toHaveProperty('auth', payload);
     });
 
     it('rejects a request without a token', async () => {

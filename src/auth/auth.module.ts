@@ -7,6 +7,7 @@ import { ConfigModule, ConfigService } from "@nestjs/config";
 import { RedisModule } from "../redis/redis.module.js";
 import { CurrentUserController } from "./current-user.controller.js";
 import { JwtAuthGuard } from "./guards/jwt-auth.guard.js";
+import { LogoutController } from './logout.controller.js';
 @Module({
     imports: [
         UsersModule,
@@ -23,7 +24,7 @@ import { JwtAuthGuard } from "./guards/jwt-auth.guard.js";
         }),
         RedisModule,
     ],
-    controllers: [AuthController, CurrentUserController],
+    controllers: [AuthController, CurrentUserController, LogoutController],
     providers: [AuthService, JwtAuthGuard],
     exports: [AuthService, JwtModule],
 })

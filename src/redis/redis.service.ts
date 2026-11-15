@@ -4,6 +4,7 @@ import {
     OnModuleDestroy,
     OnModuleInit,
     ServiceUnavailableException,
+    UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createClient } from 'redis';
@@ -61,5 +62,42 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
             );
         }
     }
+
+    async revokeToken(
+        jti: string,
+        expiresAt: number,
+    ): Promise<void> {
+        const now = Math.floor(Date.now() / 1000);
+        const remainingSeconds = expiresAt - now;
+
+        if (remainingSeconds <= 0) {
+            throw new UnauthorizedException(
+                'Invalid or expired access token',
+            );
+        }
+
+        if (!this.client.isReady) {
+            throw new ServiceUnavailableException(
+                'Authentication service temporarily unavailable',
+            );
+        }
+
+        try {
+            const result = await this.client.set(
+                `auth:blacklist:${jti}`,
+                '1',
+                { EX: remainingSeconds },
+            );
+
+            if (result !== 'OK') {
+                throw new Error('Token revocation was not confirmed');
+            }
+        } catch {
+            throw new ServiceUnavailableException(
+                'Authentication service temporarily unavailable',
+            );
+        }
+    }
+
 
 }
