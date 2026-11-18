@@ -26,7 +26,7 @@ import { LogoutController } from './logout.controller.js';
     ],
     controllers: [AuthController, CurrentUserController, LogoutController],
     providers: [AuthService, JwtAuthGuard],
-    exports: [AuthService, JwtModule],
+    exports: [AuthService, JwtModule, JwtAuthGuard],
 })
 
 export class AuthModule { }
