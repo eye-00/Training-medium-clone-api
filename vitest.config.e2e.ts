@@ -12,6 +12,7 @@ export default defineConfig({
       'test/profile-update.e2e-spec.ts',
       'test/public-profile.e2e-spec.ts',
       'test/follow-flow.e2e-spec.ts',
+      'test/avatar-flow.e2e-spec.ts',
     ],
   },
 });
