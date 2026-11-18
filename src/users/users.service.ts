@@ -2,6 +2,7 @@ import {
     BadRequestException,
     ConflictException,
     Injectable,
+    NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
@@ -12,7 +13,7 @@ import { User } from './entities/user.entity.js';
 import { RegisterUserDto } from './dto/register-user.dto.js';
 import { RegisterResponseDto } from './dto/register-response.dto.js';
 import { PublicUserDto } from './dto/register-response.dto.js';
-
+import { UpdateUserDto } from './dto/update-user.dto.js';
 @Injectable()
 export class UsersService {
     constructor(
@@ -85,5 +86,69 @@ export class UsersService {
             image: user.image,
         };
     }
+
+    async updateProfile(
+        userId: string,
+        dto: UpdateUserDto,
+    ): Promise<PublicUserDto> {
+        // Reject empty updates
+        if (
+            dto.username === undefined &&
+            dto.bio === undefined
+        ) {
+            throw new BadRequestException(
+                'At least one field must be provided',
+            );
+        }
+
+        // Verify that the user exists
+        const existingUser = await this.findPublicById(userId);
+
+        if (!existingUser) {
+            throw new NotFoundException('User not found');
+        }
+
+        // Update only allowed fields
+        const updates: Partial<Pick<User, 'username' | 'bio'>> = {};
+
+        if (dto.username !== undefined) {
+            updates.username = dto.username;
+        }
+
+        if (dto.bio !== undefined) {
+            updates.bio = dto.bio;
+        }
+
+        try {
+            await this.usersRepository.update(
+                { id: userId },
+                updates,
+            );
+        } catch (error: unknown) {
+            if (error instanceof QueryFailedError) {
+                const driverError = error.driverError as {
+                    code?: string;
+                };
+
+                if (driverError.code === 'ER_DUP_ENTRY') {
+                    throw new ConflictException(
+                        'Username already exists',
+                    );
+                }
+            }
+
+            throw error;
+        }
+
+        // Return the updated public user
+        const updatedUser = await this.findPublicById(userId);
+
+        if (!updatedUser) {
+            throw new NotFoundException('User not found');
+        }
+
+        return updatedUser;
+    }
+
 
 }
