@@ -374,6 +374,32 @@ describe('AvatarService.uploadAvatar', () => {
             context.attachmentInsert,
         ).not.toHaveBeenCalled();
     });
+
+    it('preserves the database error when cleanup also fails', async () => {
+        const context = createTestContext();
+
+        const databaseError = new Error(
+            'Database transaction failed',
+        );
+
+        context.transaction.mockRejectedValue(databaseError);
+
+        context.deleteAvatar.mockRejectedValue(
+            new Error('EACCES: permission denied'),
+        );
+
+        await expect(
+            context.service.uploadAvatar(USER_ID, {
+                buffer: Buffer.from('test-image'),
+                originalname: 'avatar.png',
+            }),
+        ).rejects.toBe(databaseError);
+
+        expect(context.saveAvatar).toHaveBeenCalledTimes(1);
+
+        expect(context.deleteAvatar).toHaveBeenCalledTimes(1);
+    });
+
 });
 
 describe('AvatarService.getPublicAvatar', () => {
@@ -580,4 +606,40 @@ describe('AvatarService.deleteAvatar', () => {
             context.deleteAvatar,
         ).not.toHaveBeenCalled();
     });
+
+    it('keeps the committed deletion when file cleanup fails', async () => {
+        const context = createTestContext();
+
+        context.user.image = `/api/avatars/${OLD_ID}`;
+
+        context.attachmentFind.mockResolvedValue({
+            id: OLD_ID,
+            ownerType: 'user',
+            ownerId: USER_ID,
+            kind: 'avatar',
+            storageKey: OLD_KEY,
+        });
+
+        context.deleteAvatar.mockRejectedValue(
+            new Error('EACCES: permission denied'),
+        );
+
+        await expect(
+            context.service.deleteAvatar(USER_ID),
+        ).resolves.toBeUndefined();
+
+        expect(context.attachmentDelete).toHaveBeenCalledWith({
+            id: OLD_ID,
+        });
+
+        expect(context.userUpdate).toHaveBeenCalledWith(
+            { id: USER_ID },
+            { image: null },
+        );
+
+        expect(context.deleteAvatar).toHaveBeenCalledWith(
+            OLD_KEY,
+        );
+    });
+
 });

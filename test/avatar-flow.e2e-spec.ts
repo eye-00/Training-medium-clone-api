@@ -363,6 +363,31 @@ describe('Avatar E2E', () => {
             .expect('Content-Type', /image\/webp/)
             .expect(200);
 
+        // Security: private attachments must not be public.
+
+        await attachmentsRepository.update(
+            { id: secondAttachmentId },
+            { visibility: 'private' },
+        );
+
+        // Even with a valid attachment ID,
+        // anonymous users must not access private files.
+        await request(server)
+            .get(secondImageUrl)
+            .expect(404);
+
+        // Restore visibility for the remaining lifecycle test.
+        await attachmentsRepository.update(
+            { id: secondAttachmentId },
+            { visibility: 'public' },
+        );
+
+        await request(server)
+            .get(secondImageUrl)
+            .expect('Content-Type', /image\/webp/)
+            .expect(200);
+
+
         // Exactly one current avatar attachment.
         const countAttachments = () =>
             attachmentsRepository.count({
@@ -419,5 +444,224 @@ describe('Avatar E2E', () => {
         await request(server)
             .get('/api/avatars/invalid-id')
             .expect(404);
+
+        // 13. Concurrent uploads: only one avatar must survive.
+        const { readdir } = await import('node:fs/promises');
+        const { join } = await import('node:path');
+
+        const avatarDirectory = join(
+            process.cwd(),
+            'uploads',
+            'avatars',
+        );
+
+        const filesBeforeRace = new Set(
+            await readdir(avatarDirectory),
+        );
+
+        const [uploadA, uploadB] = await Promise.all([
+            request(server)
+                .post(avatarUrl)
+                .set('Authorization', authorization)
+                .attach('file', firstImage, 'parallel-a.png')
+                .expect(201),
+
+            request(server)
+                .post(avatarUrl)
+                .set('Authorization', authorization)
+                .attach('file', secondImage, 'parallel-b.jpg')
+                .expect(201),
+        ]);
+
+        const urlA = uploadA.body.image as string;
+        const urlB = uploadB.body.image as string;
+
+        expect(urlA).not.toBe(urlB);
+
+        // The database must point to exactly one upload.
+        const userAfterRace = await dataSource
+            .getRepository(User)
+            .findOneByOrFail({ id: userId });
+
+        expect([urlA, urlB]).toContain(
+            userAfterRace.image,
+        );
+
+        expect(await countAttachments()).toBe(1);
+
+        const winnerUrl = userAfterRace.image;
+
+        if (!winnerUrl) {
+            throw new Error('Concurrent uploads lost avatar');
+        }
+
+        const winnerId =
+            /^\/api\/avatars\/([0-9a-f-]{36})$/i.exec(
+                winnerUrl,
+            )?.[1];
+
+        if (!winnerId) {
+            throw new Error('Invalid winning avatar URL');
+        }
+
+        const winnerAttachment =
+            await attachmentsRepository.findOneByOrFail({
+                id: winnerId,
+                ownerType: 'user',
+                ownerId: userId,
+                kind: 'avatar',
+            });
+
+        trackedStorageKeys.add(
+            winnerAttachment.storageKey,
+        );
+
+        const loserUrl =
+            winnerUrl === urlA ? urlB : urlA;
+
+        // Only the current avatar remains accessible.
+        await request(server)
+            .get(winnerUrl)
+            .expect('Content-Type', /image\/webp/)
+            .expect(200);
+
+        await request(server)
+            .get(loserUrl)
+            .expect(404);
+
+        // No extra file should remain from the losing upload.
+        const newFiles = (
+            await readdir(avatarDirectory)
+        ).filter((file) => !filesBeforeRace.has(file));
+
+        expect(newFiles).toEqual([
+            winnerAttachment.storageKey.slice(
+                'avatars/'.length,
+            ),
+        ]);
+
+        // 14. Concurrent POST / DELETE.
+        // The previous race left exactly one avatar.
+
+        const filesBeforePostDelete = new Set(
+            await readdir(avatarDirectory),
+        );
+
+        const [uploadResponse] = await Promise.all([
+            request(server)
+                .post(avatarUrl)
+                .set('Authorization', authorization)
+                .attach(
+                    'file',
+                    firstImage,
+                    'upload-during-delete.png',
+                )
+                .expect(201),
+
+            request(server)
+                .delete(avatarUrl)
+                .set('Authorization', authorization)
+                .expect(204),
+        ]);
+
+        const uploadedUrl =
+            uploadResponse.body.image as string;
+
+        expect(uploadedUrl).toMatch(
+            /^\/api\/avatars\/[0-9a-f-]{36}$/i,
+        );
+
+        const userAfterPostDelete = await dataSource
+            .getRepository(User)
+            .findOneByOrFail({ id: userId });
+
+        const remainingAttachments =
+            await attachmentsRepository.find({
+                where: {
+                    ownerType: 'user',
+                    ownerId: userId,
+                    kind: 'avatar',
+                },
+            });
+
+        // The old avatar must never survive the race.
+        await request(server)
+            .get(winnerUrl)
+            .expect(404);
+
+        expect(
+            await storage.readAvatar(
+                winnerAttachment.storageKey,
+            ),
+        ).toBeNull();
+
+        const filesAfterPostDelete =
+            await readdir(avatarDirectory);
+
+        const newlyCreatedFiles =
+            filesAfterPostDelete.filter(
+                (file) => !filesBeforePostDelete.has(file),
+            );
+
+        if (userAfterPostDelete.image === null) {
+            // Valid outcome:
+            // POST committed 1st, DELETE committed last.
+
+            expect(remainingAttachments).toHaveLength(0);
+
+            await request(server)
+                .get(uploadedUrl)
+                .expect(404);
+
+            // Neither the old nor the new image remains.
+            expect(newlyCreatedFiles).toEqual([]);
+        } else {
+            // Valid outcome:
+            // DELETE committed 1st, POST committed last.
+
+            expect(userAfterPostDelete.image).toBe(
+                uploadedUrl,
+            );
+
+            expect(remainingAttachments).toHaveLength(1);
+
+            const currentAttachment =
+                remainingAttachments[0];
+
+            if (!currentAttachment) {
+                throw new Error(
+                    'Missing current avatar attachment',
+                );
+            }
+
+            expect(uploadedUrl).toBe(
+                `/api/avatars/${currentAttachment.id}`,
+            );
+
+            trackedStorageKeys.add(
+                currentAttachment.storageKey,
+            );
+
+            await request(server)
+                .get(uploadedUrl)
+                .expect('Content-Type', /image\/webp/)
+                .expect(200);
+
+            // Only the surviving upload may create a new file.
+            expect(newlyCreatedFiles).toEqual([
+                currentAttachment.storageKey.slice(
+                    'avatars/'.length,
+                ),
+            ]);
+        }
+
+        // User reference and attachment records agree.
+        expect(
+            userAfterPostDelete.image === null
+                ? remainingAttachments.length === 0
+                : remainingAttachments.length === 1,
+        ).toBe(true);
+
+
     }, 40000);
 });
