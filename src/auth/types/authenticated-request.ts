@@ -7,3 +7,9 @@ export interface AuthenticatedRequest {
     user?: PublicUserDto;
     auth?: JwtAccessPayload;
 }
+
+export interface JwtAuthenticatedRequest
+  extends AuthenticatedRequest {
+  user: PublicUserDto;
+  auth: JwtAccessPayload;
+}
