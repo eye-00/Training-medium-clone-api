@@ -193,7 +193,8 @@ describe('FollowsService.unfollow', () => {
         expect(deleteFollow).not.toHaveBeenCalled();
     });
 
-    it('rejects self-unfollow', async () => {
+
+    it('treats self-unfollow as a no-op', async () => {
         const { service, target, deleteFollow } =
             createTestContext();
 
@@ -201,8 +202,9 @@ describe('FollowsService.unfollow', () => {
 
         await expect(
             service.unfollow(followerId, targetUsername),
-        ).rejects.toBeInstanceOf(BadRequestException);
+        ).resolves.toBeUndefined();
 
         expect(deleteFollow).not.toHaveBeenCalled();
     });
+
 });

@@ -19,8 +19,8 @@ export class FollowsService {
     @InjectRepository(Follow)
     private readonly followsRepository: Repository<Follow>,
   ) { }
+
   private async resolveTarget(
-    followerId: string,
     username: string,
   ): Promise<User> {
     const target = await this.usersRepository.findOne({
@@ -31,23 +31,21 @@ export class FollowsService {
       throw new NotFoundException('Profile not found');
     }
 
-    if (target.id === followerId) {
-      throw new BadRequestException(
-        'You cannot follow yourself',
-      );
-    }
-
     return target;
   }
+
 
   async follow(
     followerId: string,
     username: string,
   ): Promise<void> {
-    const target = await this.resolveTarget(
-      followerId,
-      username,
-    );
+    const target = await this.resolveTarget(username);
+
+    if (target.id === followerId) {
+      throw new BadRequestException(
+        'You cannot follow yourself',
+      );
+    }
 
     try {
       await this.followsRepository.insert({
@@ -83,10 +81,11 @@ export class FollowsService {
     followerId: string,
     username: string,
   ): Promise<void> {
-    const target = await this.resolveTarget(
-      followerId,
-      username,
-    );
+    const target = await this.resolveTarget(username);
+
+    if (target.id === followerId) {
+      return;
+    }
 
     await this.followsRepository.delete({
       followerId,

@@ -173,12 +173,14 @@ describe('AvatarService.uploadAvatar', () => {
             /^\/api\/avatars\/[0-9a-f-]{36}$/,
         );
 
-        expect(
-            context.userUpdate,
-        ).toHaveBeenCalledWith(
+
+        expect(context.userUpdate).toHaveBeenCalledWith(
             { id: USER_ID },
-            { image: result.image },
+            {
+                image: result.image.replace('/api/avatars/', '',),
+            },
         );
+
 
         expect(
             context.deleteAvatar,
@@ -188,7 +190,7 @@ describe('AvatarService.uploadAvatar', () => {
     it('replaces old avatar and deletes old file after commit', async () => {
         const context = createTestContext();
 
-        context.user.image = `/api/avatars/${OLD_ID}`;
+        context.user.image = OLD_ID;
 
         context.attachmentFind.mockResolvedValue({
             id: OLD_ID,
@@ -295,7 +297,7 @@ describe('AvatarService.uploadAvatar', () => {
     it('does not delete old file when user UPDATE fails', async () => {
         const context = createTestContext();
 
-        context.user.image = `/api/avatars/${OLD_ID}`;
+        context.user.image = OLD_ID;
 
         context.attachmentFind.mockResolvedValue({
             id: OLD_ID,
@@ -329,7 +331,7 @@ describe('AvatarService.uploadAvatar', () => {
     it('handles missing previous attachment metadata', async () => {
         const context = createTestContext();
 
-        context.user.image = `/api/avatars/${OLD_ID}`;
+        context.user.image = OLD_ID;
 
         context.attachmentFind.mockResolvedValue(null);
 
@@ -508,7 +510,7 @@ describe('AvatarService.deleteAvatar', () => {
     it('deletes the old file only after transaction commit', async () => {
         const context = createTestContext();
 
-        context.user.image = `/api/avatars/${OLD_ID}`;
+        context.user.image = OLD_ID;
 
         context.attachmentFind.mockResolvedValue({
             id: OLD_ID,
@@ -585,7 +587,7 @@ describe('AvatarService.deleteAvatar', () => {
     it('preserves the file when database update fails', async () => {
         const context = createTestContext();
 
-        context.user.image = `/api/avatars/${OLD_ID}`;
+        context.user.image = OLD_ID;
 
         context.attachmentFind.mockResolvedValue({
             id: OLD_ID,
@@ -610,7 +612,7 @@ describe('AvatarService.deleteAvatar', () => {
     it('keeps the committed deletion when file cleanup fails', async () => {
         const context = createTestContext();
 
-        context.user.image = `/api/avatars/${OLD_ID}`;
+        context.user.image = OLD_ID;
 
         context.attachmentFind.mockResolvedValue({
             id: OLD_ID,

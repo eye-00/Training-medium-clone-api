@@ -12,8 +12,8 @@ import {
 } from 'node:fs/promises';
 import { join } from 'node:path';
 import sharp from 'sharp';
+import { MAX_AVATAR_FILE_BYTES } from './constants.js';
 
-const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_INPUT_PIXELS = 20_000_000;
 const AVATAR_SIZE = 512;
 
@@ -55,7 +55,7 @@ export class AvatarStorageService {
             );
         }
 
-        if (input.length > MAX_FILE_BYTES) {
+        if (input.length > MAX_AVATAR_FILE_BYTES) {
             throw new PayloadTooLargeException(
                 'Avatar must not exceed 2 MB',
             );

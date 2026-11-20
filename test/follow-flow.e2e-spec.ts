@@ -230,7 +230,7 @@ describe('Follow / Unfollow E2E', () => {
         await request(server)
             .delete(ownFollowUrl)
             .set('Authorization', authorization)
-            .expect(400);
+            .expect(204);
 
         // 5. Follow successfully.
         await request(server)

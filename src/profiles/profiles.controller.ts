@@ -7,7 +7,6 @@ import {
     Param,
     Post,
     Req,
-    UnauthorizedException,
     UseGuards,
 } from '@nestjs/common';
 
@@ -25,7 +24,7 @@ import {
 } from '@nestjs/swagger';
 
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
-import type { AuthenticatedRequest } from '../auth/types/authenticated-request.js';
+import type { JwtAuthenticatedRequest } from '../auth/types/authenticated-request.js';
 
 import { ProfileResponseDto } from './dto/profile-response.dto.js';
 import { FollowsService } from './follows.service.js';
@@ -79,13 +78,8 @@ export class ProfilesController {
     })
     async follow(
         @Param('username') username: string,
-        @Req() request: AuthenticatedRequest,
+        @Req() request: JwtAuthenticatedRequest,
     ): Promise<void> {
-        if (!request.user) {
-            throw new UnauthorizedException(
-                'Unauthenticated request',
-            );
-        }
 
         await this.followsService.follow(
             request.user.id,
@@ -115,13 +109,8 @@ export class ProfilesController {
     })
     async unfollow(
         @Param('username') username: string,
-        @Req() request: AuthenticatedRequest,
+        @Req() request: JwtAuthenticatedRequest,
     ): Promise<void> {
-        if (!request.user) {
-            throw new UnauthorizedException(
-                'Unauthenticated request',
-            );
-        }
 
         await this.followsService.unfollow(
             request.user.id,

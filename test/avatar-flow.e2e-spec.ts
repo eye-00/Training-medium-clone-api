@@ -243,9 +243,13 @@ describe('Avatar E2E', () => {
                 firstImageUrl,
             )?.[1];
 
-        if (!firstAttachmentId) {
-            throw new Error('Invalid uploaded avatar URL');
-        }
+        const userAfterFirstUpload = await dataSource
+            .getRepository(User)
+            .findOneByOrFail({ id: userId });
+
+        expect(userAfterFirstUpload.image).toBe(
+            firstAttachmentId,
+        );
 
         const firstAttachment =
             await attachmentsRepository.findOneByOrFail({
@@ -264,6 +268,14 @@ describe('Avatar E2E', () => {
         });
 
         expect(firstAttachment.sizeBytes).toBeGreaterThan(0);
+
+        const persistedUser = await dataSource
+            .getRepository(User)
+            .findOneByOrFail({ id: userId });
+
+        // Database stores attachment ID, not the API URL.
+        expect(persistedUser.image).toBe(firstAttachmentId);
+
 
         // 6. Read public image without JWT.
         const publicImage = await request(server)
@@ -299,6 +311,17 @@ describe('Avatar E2E', () => {
         expect(publicProfile.body.profile.image).toBe(
             firstImageUrl,
         );
+
+
+        const loginAfterUpload = await request(server)
+            .post('/api/users/login')
+            .send({ email, password })
+            .expect(200);
+
+        expect(loginAfterUpload.body.user.image).toBe(
+            firstImageUrl,
+        );
+
 
         // 8. Upload a replacement JPEG image.
         const secondImage = await sharp({
@@ -483,26 +506,22 @@ describe('Avatar E2E', () => {
             .getRepository(User)
             .findOneByOrFail({ id: userId });
 
-        expect([urlA, urlB]).toContain(
-            userAfterRace.image,
-        );
 
         expect(await countAttachments()).toBe(1);
 
-        const winnerUrl = userAfterRace.image;
 
-        if (!winnerUrl) {
+
+        const winnerId = userAfterRace.image;
+
+        if (!winnerId) {
             throw new Error('Concurrent uploads lost avatar');
         }
 
-        const winnerId =
-            /^\/api\/avatars\/([0-9a-f-]{36})$/i.exec(
-                winnerUrl,
-            )?.[1];
+        const winnerUrl = `/api/avatars/${winnerId}`;
 
-        if (!winnerId) {
-            throw new Error('Invalid winning avatar URL');
-        }
+        expect([urlA, urlB]).toContain(winnerUrl);
+        expect(await countAttachments()).toBe(1);
+
 
         const winnerAttachment =
             await attachmentsRepository.findOneByOrFail({
@@ -619,10 +638,6 @@ describe('Avatar E2E', () => {
             // Valid outcome:
             // DELETE committed 1st, POST committed last.
 
-            expect(userAfterPostDelete.image).toBe(
-                uploadedUrl,
-            );
-
             expect(remainingAttachments).toHaveLength(1);
 
             const currentAttachment =
@@ -633,6 +648,11 @@ describe('Avatar E2E', () => {
                     'Missing current avatar attachment',
                 );
             }
+
+            expect(userAfterPostDelete.image).toBe(
+                currentAttachment.id,
+            );
+
 
             expect(uploadedUrl).toBe(
                 `/api/avatars/${currentAttachment.id}`,

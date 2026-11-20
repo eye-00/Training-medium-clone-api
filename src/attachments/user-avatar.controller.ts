@@ -3,7 +3,6 @@ import {
     Controller,
     Post,
     Req,
-    UnauthorizedException,
     UploadedFile,
     UseGuards,
     UseInterceptors,
@@ -28,9 +27,9 @@ import {
 import { memoryStorage } from 'multer';
 
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
-import type { AuthenticatedRequest } from '../auth/types/authenticated-request.js';
+import type { JwtAuthenticatedRequest } from '../auth/types/authenticated-request.js';
 import { AvatarService } from './avatar.service.js';
-
+import { MAX_AVATAR_FILE_BYTES } from './constants.js';
 interface UploadedAvatarFile {
     buffer: Buffer;
     originalname: string;
@@ -49,7 +48,7 @@ export class UserAvatarController {
         FileInterceptor('file', {
             storage: memoryStorage(),
             limits: {
-                fileSize: 2 * 1024 * 1024,
+                fileSize: MAX_AVATAR_FILE_BYTES,
                 files: 1,
             },
         }),
@@ -95,14 +94,9 @@ export class UserAvatarController {
         description: 'Redis blacklist check is unavailable',
     })
     async uploadAvatar(
-        @Req() request: AuthenticatedRequest,
+        @Req() request: JwtAuthenticatedRequest,
         @UploadedFile() file: UploadedAvatarFile | undefined,
     ): Promise<{ image: string }> {
-        if (!request.user) {
-            throw new UnauthorizedException(
-                'Unauthenticated request',
-            );
-        }
 
         if (!file) {
             throw new BadRequestException(
@@ -133,13 +127,8 @@ export class UserAvatarController {
         description: 'Redis blacklist check is unavailable',
     })
     async deleteAvatar(
-        @Req() request: AuthenticatedRequest,
+        @Req() request: JwtAuthenticatedRequest,
     ): Promise<void> {
-        if (!request.user) {
-            throw new UnauthorizedException(
-                'Unauthenticated request',
-            );
-        }
 
         await this.avatarService.deleteAvatar(
             request.user.id,

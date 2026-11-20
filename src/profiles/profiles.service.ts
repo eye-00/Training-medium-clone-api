@@ -8,6 +8,7 @@ import type { Repository } from 'typeorm';
 import { User } from '../users/entities/user.entity.js';
 import { Follow } from './entities/follow.entity.js';
 import { ProfileResponseDto } from './dto/profile-response.dto.js';
+import { toAvatarUrl } from '../attachments/avatar-url.js';
 
 @Injectable()
 export class ProfilesService {
@@ -44,7 +45,7 @@ export class ProfilesService {
             profile: {
                 username: user.username,
                 bio: user.bio,
-                image: user.image,
+                image: toAvatarUrl(user.image),
                 followersCount,
                 followingCount,
             },

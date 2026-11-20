@@ -1,4 +1,3 @@
-
 import {
     Injectable,
     Logger,
@@ -12,7 +11,6 @@ import { Attachment } from './entities/attachment.entity.js';
 import { AvatarStorageService } from './avatar-storage.service.js';
 import { isUUID } from 'class-validator';
 
-
 interface AvatarUploadFile {
     buffer: Buffer;
     originalname: string;
@@ -20,7 +18,7 @@ interface AvatarUploadFile {
 
 
 interface AvatarUpdateResult {
-    imageUrl: string;
+    attachmentId: string;
     oldStorageKey: string | null;
 }
 
@@ -73,10 +71,7 @@ export class AvatarService {
                     // to this user and was managed by our API.
                     let oldStorageKey: string | null = null;
 
-                    const oldAttachmentId =
-                        /^\/api\/avatars\/([0-9a-f-]{36})$/i.exec(
-                            user.image ?? '',
-                        )?.[1];
+                    const oldAttachmentId = user.image;
 
                     if (oldAttachmentId) {
                         const oldAttachment =
@@ -117,16 +112,13 @@ export class AvatarService {
                         visibility: 'public',
                     });
 
-                    const imageUrl =
-                        `/api/avatars/${attachmentId}`;
-
                     await usersRepository.update(
                         { id: userId },
-                        { image: imageUrl },
+                        { image: attachmentId },
                     );
 
                     return {
-                        imageUrl,
+                        attachmentId,
                         oldStorageKey,
                     };
                 },
@@ -150,7 +142,7 @@ export class AvatarService {
         }
 
         return {
-            image: result.imageUrl,
+            image: `/api/avatars/${result.attachmentId}`,
         };
     }
 
@@ -217,10 +209,7 @@ export class AvatarService {
                     return null;
                 }
 
-                const oldAttachmentId =
-                    /^\/api\/avatars\/([0-9a-f-]{36})$/i.exec(
-                        user.image,
-                    )?.[1];
+                const oldAttachmentId = user.image;
 
                 let storageKey: string | null = null;
 

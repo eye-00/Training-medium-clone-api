@@ -14,6 +14,7 @@ import { RegisterUserDto } from './dto/register-user.dto.js';
 import { RegisterResponseDto } from './dto/register-response.dto.js';
 import { PublicUserDto } from './dto/register-response.dto.js';
 import { UpdateUserDto } from './dto/update-user.dto.js';
+import { toAvatarUrl } from '../attachments/avatar-url.js';
 @Injectable()
 export class UsersService {
     constructor(
@@ -83,7 +84,7 @@ export class UsersService {
             email: user.email,
             username: user.username,
             bio: user.bio,
-            image: user.image,
+            image: toAvatarUrl(user.image),
         };
     }
 

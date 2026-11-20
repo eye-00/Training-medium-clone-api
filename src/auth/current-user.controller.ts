@@ -5,7 +5,6 @@ import {
     Get,
     Put,
     Req,
-    UnauthorizedException,
     UseGuards,
 } from '@nestjs/common';
 import {
@@ -23,7 +22,7 @@ import { UpdateUserDto } from '../users/dto/update-user.dto.js';
 import { UsersService } from '../users/users.service.js';
 import { RegisterResponseDto } from '../users/dto/register-response.dto.js';
 import { JwtAuthGuard } from './guards/jwt-auth.guard.js';
-import type { AuthenticatedRequest } from './types/authenticated-request.js';
+import type { JwtAuthenticatedRequest } from './types/authenticated-request.js';
 
 @ApiTags('Authentication')
 @Controller('user')
@@ -43,13 +42,8 @@ export class CurrentUserController {
     })
 
     getCurrentUser(
-        @Req() request: AuthenticatedRequest,
+        @Req() request: JwtAuthenticatedRequest,
     ): RegisterResponseDto {
-        if (!request.user) {
-            throw new UnauthorizedException(
-                'Unauthenticated request',
-            );
-        }
 
         return {
             user: request.user,
@@ -75,14 +69,9 @@ export class CurrentUserController {
         description: 'Redis blacklist check is unavailable',
     })
     async updateCurrentUser(
-        @Req() request: AuthenticatedRequest,
+        @Req() request: JwtAuthenticatedRequest,
         @Body() dto: UpdateUserDto,
     ): Promise<RegisterResponseDto> {
-        if (!request.user) {
-            throw new UnauthorizedException(
-                'Unauthenticated request',
-            );
-        }
 
         const updatedUser =
             await this.usersService.updateProfile(

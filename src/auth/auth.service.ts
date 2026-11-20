@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { UsersService } from '../users/users.service.js';
 import { LoginResponseDto } from './dto/login-response.dto.js';
 import { LoginUserDto } from './dto/login-user.dto.js';
+import { toAvatarUrl } from '../attachments/avatar-url.js';
 
 @Injectable()
 export class AuthService {
@@ -40,7 +41,7 @@ export class AuthService {
                 email: user.email,
                 username: user.username,
                 bio: user.bio,
-                image: user.image,
+                image: toAvatarUrl(user.image),
             },
             accessToken: await accessToken,
         }
