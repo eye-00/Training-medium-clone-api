@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
-// import { ArticlesModule } from './articles/articles.module.js';
+import { ArticlesModule } from './articles/articles.module.js';
 import {
   AcceptLanguageLocaleResolver,
   I18nModule,
@@ -61,6 +61,7 @@ import { AttachmentsModule } from './attachments/attachments.module.js';
     AuthModule,
     ProfilesModule,
     AttachmentsModule,
+    ArticlesModule,
 
   ],
   controllers: [AppController],

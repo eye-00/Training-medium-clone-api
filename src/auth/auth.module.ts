@@ -8,6 +8,7 @@ import { RedisModule } from "../redis/redis.module.js";
 import { CurrentUserController } from "./current-user.controller.js";
 import { JwtAuthGuard } from "./guards/jwt-auth.guard.js";
 import { LogoutController } from './logout.controller.js';
+import { OptionalJwtAuthGuard } from './guards/optional-jwt-auth.guard.js';
 @Module({
     imports: [
         UsersModule,
@@ -25,8 +26,8 @@ import { LogoutController } from './logout.controller.js';
         RedisModule,
     ],
     controllers: [AuthController, CurrentUserController, LogoutController],
-    providers: [AuthService, JwtAuthGuard],
-    exports: [AuthService, JwtModule, JwtAuthGuard],
+    providers: [AuthService, JwtAuthGuard, OptionalJwtAuthGuard],
+    exports: [AuthService, JwtModule, JwtAuthGuard, OptionalJwtAuthGuard],
 })
 
 export class AuthModule { }
