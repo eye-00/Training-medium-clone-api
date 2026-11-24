@@ -1,4 +1,3 @@
-
 import {
     type INestApplication,
     ValidationPipe,
@@ -18,7 +17,6 @@ import {
 import { User } from '../src/users/entities/user.entity.js';
 import { Article } from '../src/articles/entities/article.entity.js';
 import { Tag } from '../src/articles/entities/tag.entity.js';
-import { ArticleTag } from '../src/articles/entities/article-tag.entity.js';
 import { ArticleFavorite } from '../src/articles/entities/article-favorite.entity.js';
 import { Follow } from '../src/profiles/entities/follow.entity.js';
 
@@ -26,27 +24,10 @@ describe('Article Listing E2E', () => {
     let app: INestApplication | undefined;
     let databaseVerified = false;
 
-    const createdUsers: Array<{
-        id: string;
-        email: string;
-    }> = [];
-
-
-    const suffix = randomUUID()
-        .replaceAll('-', '')
-        .slice(0, 16);
-
+    const createdUsers: Array<{ id: string; email: string }> = [];
+    const createdTags = new Set<string>();
+    const suiteSuffix = randomUUID().replaceAll('-', '').slice(0, 8);
     const password = 'ExamplePass123!';
-
-    const aliceUsername = `list_alice_${suffix}`;
-    const bobUsername = `list_bob_${suffix}`;
-    const charlieUsername = `list_charlie_${suffix}`;
-
-    const scopeTag = `scope_${suffix}`;
-    const nestjsTag = `nestjs_${suffix}`;
-    const backendTag = `backend_${suffix}`;
-    const typescriptTag = `typescript_${suffix}`;
-
 
     beforeAll(async () => {
         const env = process.env;
@@ -63,17 +44,13 @@ describe('Article Listing E2E', () => {
             throw new Error('Unsafe E2E environment');
         }
 
-        const { AppModule } = await import(
-            '../src/app.module.js'
-        );
-
+        const { AppModule } = await import('../src/app.module.js');
         const moduleRef = await Test.createTestingModule({
             imports: [AppModule],
         }).compile();
 
         app = moduleRef.createNestApplication();
         app.setGlobalPrefix('api');
-
         app.useGlobalPipes(
             new ValidationPipe({
                 whitelist: true,
@@ -85,11 +62,11 @@ describe('Article Listing E2E', () => {
         await app.init();
 
         const rows = (await app.get(DataSource).query(`
-      SELECT
-        DATABASE() AS db,
-        CURRENT_USER() AS dbUser,
-        @@server_uuid AS serverUuid
-    `)) as Array<{
+            SELECT
+                DATABASE() AS db,
+                CURRENT_USER() AS dbUser,
+                @@server_uuid AS serverUuid
+        `)) as Array<{
             db: string;
             dbUser: string;
             serverUuid: string;
@@ -102,9 +79,7 @@ describe('Article Listing E2E', () => {
             !identity.dbUser.startsWith('medium_test_user@') ||
             identity.serverUuid !== env.DB_TEST_SERVER_UUID
         ) {
-            throw new Error(
-                'E2E database identity verification failed',
-            );
+            throw new Error('E2E database identity verification failed');
         }
 
         databaseVerified = true;
@@ -117,8 +92,8 @@ describe('Article Listing E2E', () => {
             if (databaseVerified) {
                 const db = app.get(DataSource);
 
-                // Only remove users created by this test.
-                // FK cascades remove their articles and links.
+                // Only remove users registered by this suite.
+                // Their article records and relationships cascade.
                 for (const user of createdUsers) {
                     await db.getRepository(User).delete({
                         id: user.id,
@@ -126,411 +101,293 @@ describe('Article Listing E2E', () => {
                     });
                 }
 
-                // Remove only this test's uniquely named tags.
-                await db.getRepository(Tag).delete({
-                    name: In([
-                        scopeTag,
-                        nestjsTag,
-                        backendTag,
-                        typescriptTag,
-                    ]),
-                });
+                // Only remove uniquely generated tags from this suite.
+                if (createdTags.size > 0) {
+                    await db.getRepository(Tag).delete({
+                        name: In([...createdTags]),
+                    });
+                }
             }
         } finally {
             await app.close();
         }
     }, 20000);
 
-
-    it('validates listing, filtering, pagination and viewer state', async () => {
+    function context() {
         if (!app || !databaseVerified) {
             throw new Error('Test app is not ready');
         }
+        return {
+            server: app.getHttpServer(),
+            db: app.get(DataSource),
+        };
+    }
 
-        const server = app.getHttpServer();
-        const db = app.get(DataSource);
+    function makeTag(prefix: string): string {
+        const value = `${prefix}_${suiteSuffix}_${randomUUID().replaceAll('-', '').slice(0, 10)}`;
+        createdTags.add(value);
+        return value;
+    }
+
+    async function registerUser() {
+        const { server } = context();
+        const identity = `${suiteSuffix}_${randomUUID().replaceAll('-', '').slice(0, 10)}`;
+        const username = `lst_${identity}`;
+        const email = `${username}@example.com`;
+        const registration = await request(server)
+            .post('/api/users')
+            .send({ email, username, password })
+            .expect(201);
+
+        const id = registration.body.user.id as string;
+        createdUsers.push({ id, email });
+
+        const login = await request(server)
+            .post('/api/users/login')
+            .send({ email, password })
+            .expect(200);
+
+        return {
+            id,
+            username,
+            authorization: `Bearer ${login.body.accessToken as string}`,
+        };
+    }
+
+    const url = '/api/articles';
+    const getSlugs = (items: Array<{ slug: string }>) =>
+        items.map((item) => item.slug);
+
+    async function createArticle(
+        authorization: string,
+        title: string,
+        tagList: string[],
+        createdAt: Date,
+    ) {
+        const { server, db } = context();
+        const response = await request(server)
+            .post(url)
+            .set('Authorization', authorization)
+            .send({
+                article: {
+                    title,
+                    description: `Description of ${title}`,
+                    body: `Body content of ${title}`,
+                    tagList,
+                },
+            })
+            .expect(201);
 
         const articles = db.getRepository(Article);
-        const favorites = db.getRepository(ArticleFavorite);
-        const follows = db.getRepository(Follow);
+        const article = await articles.findOneByOrFail({
+            slug: response.body.article.slug as string,
+        });
+        await articles.update({ id: article.id }, { createdAt });
+        return article;
+    }
 
-        // 1. Helper: register and authenticate a user.
-        async function registerUser(username: string) {
-            const email = `${username}@example.com`;
+    // Each call creates independent users, tags, articles and viewer state.
+    // All exact count/order assertions are scoped to these unique values.
+    async function fixture() {
+        const { server, db } = context();
+        const scopeTag = makeTag('list_scope');
+        const nestjsTag = makeTag('list_nestjs');
+        const backendTag = makeTag('list_backend');
+        const typescriptTag = makeTag('list_typescript');
 
-            const registration = await request(server)
-                .post('/api/users')
-                .send({
-                    email,
-                    username,
-                    password,
-                })
-                .expect(201);
+        const alice = await registerUser();
+        const bob = await registerUser();
+        const charlie = await registerUser();
 
-            const id = registration.body.user.id as string;
-
-            createdUsers.push({ id, email });
-
-            const login = await request(server)
-                .post('/api/users/login')
-                .send({ email, password })
-                .expect(200);
-
-            return {
-                id,
-                username,
-                authorization:
-                    `Bearer ${login.body.accessToken as string}`,
-            };
-        }
-
-        // 2. Register three independent test users.
-        const alice = await registerUser(aliceUsername);
-        const bob = await registerUser(bobUsername);
-        const charlie = await registerUser(charlieUsername);
-
-        // 3. Helper: create an article.
-        async function createArticle(
-            authorization: string,
-            title: string,
-            tagList: string[],
-            createdAt: Date,
-        ) {
-            const response = await request(server)
-                .post('/api/articles')
-                .set('Authorization', authorization)
-                .send({
-                    article: {
-                        title,
-                        description: `Description of ${title}`,
-                        body: `Body content of ${title}`,
-                        tagList: [scopeTag, ...tagList],
-                    },
-                })
-                .expect(201);
-
-            const article = await articles.findOneByOrFail({
-                slug: response.body.article.slug as string,
-            });
-
-            // Use deterministic timestamps for sorting tests.
-            await articles.update(
-                { id: article.id },
-                { createdAt },
-            );
-
-            return article;
-        }
-
-        // 4. Create four articles with known timestamps.
         const articleA = await createArticle(
-            alice.authorization,
-            'Article A',
-            [nestjsTag, backendTag],
+            alice.authorization, 'Article A',
+            [scopeTag, nestjsTag, backendTag],
             new Date('2025-01-01T00:00:00Z'),
         );
-
         const articleB = await createArticle(
-            alice.authorization,
-            'Article B',
-            [typescriptTag],
+            alice.authorization, 'Article B',
+            [scopeTag, typescriptTag],
             new Date('2025-01-02T00:00:00Z'),
         );
-
         const articleC = await createArticle(
-            bob.authorization,
-            'Article C',
-            [nestjsTag, typescriptTag],
+            bob.authorization, 'Article C',
+            [scopeTag, nestjsTag, typescriptTag],
             new Date('2025-01-03T00:00:00Z'),
         );
-
         const articleD = await createArticle(
-            bob.authorization,
-            'Article D',
-            [backendTag],
+            bob.authorization, 'Article D',
+            [scopeTag, backendTag],
             new Date('2025-01-04T00:00:00Z'),
         );
 
-        // 5. Seed favorites directly.
-        // Favorite endpoints are not implemented yet.
-        await favorites.insert([
-            {
-                userId: charlie.id,
-                articleId: articleA.id,
-            },
-            {
-                userId: bob.id,
-                articleId: articleB.id,
-            },
-            {
-                userId: charlie.id,
-                articleId: articleC.id,
-            },
+        // Seed viewer relationships; favorite/follow writes have their own suites.
+        await db.getRepository(ArticleFavorite).insert([
+            { userId: charlie.id, articleId: articleA.id },
+            { userId: bob.id, articleId: articleB.id },
+            { userId: charlie.id, articleId: articleC.id },
         ]);
-
-        // Charlie follows Alice.
-        await follows.insert({
+        await db.getRepository(Follow).insert({
             followerId: charlie.id,
             followedId: alice.id,
         });
 
-        const url = '/api/articles';
+        return {
+            server, scopeTag, nestjsTag, backendTag, typescriptTag,
+            alice, bob, charlie, articleA, articleB, articleC, articleD,
+        };
+    }
 
-        // Helper: extract slugs from a list response.
-        function getSlugs(
-            items: Array<{ slug: string }>,
-        ): string[] {
-            return items.map((item) => item.slug);
-        }
+    it('returns a public article list with the default page size', async () => {
+        const { server } = await fixture();
+        const response = await request(server).get(url).expect(200);
 
-        // 6. Public listing without query parameters.
-        const defaultList = await request(server)
-            .get(url)
-            .expect(200);
+        expect(Array.isArray(response.body.articles)).toBe(true);
+        expect(response.body.articles.length).toBeLessThanOrEqual(20);
+        // Other suites may have articles in the same database.
+        expect(response.body.articlesCount).toBeGreaterThanOrEqual(4);
+    }, 40000);
 
-        expect(Array.isArray(defaultList.body.articles))
-            .toBe(true);
+    it('sorts scoped articles newest first and exposes only public list fields', async () => {
+        const f = await fixture();
+        const response = await request(f.server)
+            .get(url).query({ tag: f.scopeTag }).expect(200);
 
-        expect(defaultList.body.articles.length)
-            .toBeLessThanOrEqual(20);
-
-        expect(defaultList.body.articlesCount)
-            .toBeGreaterThanOrEqual(4);
-
-        // 7. Public listing ordered newest first.
-        const publicList = await request(server)
-            .get(url)
-            .query({ tag: scopeTag })
-            .expect(200);
-
-        expect(publicList.body.articlesCount).toBe(4);
-
-        expect(getSlugs(publicList.body.articles)).toEqual([
-            articleD.slug,
-            articleC.slug,
-            articleB.slug,
-            articleA.slug,
+        expect(response.body.articlesCount).toBe(4);
+        expect(getSlugs(response.body.articles)).toEqual([
+            f.articleD.slug, f.articleC.slug, f.articleB.slug, f.articleA.slug,
         ]);
-
-        // Public users have no personalized state.
-        for (const item of publicList.body.articles) {
+        for (const item of response.body.articles) {
             expect(item.favorited).toBe(false);
             expect(item.author.following).toBe(false);
-
-            // List responses must not expose article body.
             expect(item).not.toHaveProperty('body');
             expect(item).not.toHaveProperty('authorId');
             expect(item.author).not.toHaveProperty('email');
             expect(item.author).not.toHaveProperty('passwordHash');
         }
-
-        // 8. Filter by tag.
-        const byTag = await request(server)
-            .get(url)
-            .query({
-                tag: nestjsTag.toUpperCase(),
-            })
-            .expect(200);
-
-        expect(byTag.body.articlesCount).toBe(2);
-
-        expect(getSlugs(byTag.body.articles)).toEqual([
-            articleC.slug,
-            articleA.slug,
-        ]);
-
-        // 9. Filter by author.
-        const byAuthor = await request(server)
-            .get(url)
-            .query({
-                author: alice.username,
-            })
-            .expect(200);
-
-        expect(byAuthor.body.articlesCount).toBe(2);
-
-        expect(getSlugs(byAuthor.body.articles)).toEqual([
-            articleB.slug,
-            articleA.slug,
-        ]);
-
-        // 10. Filter by favorited username.
-        const byFavorited = await request(server)
-            .get(url)
-            .query({
-                favorited: charlie.username,
-            })
-            .expect(200);
-
-        expect(byFavorited.body.articlesCount).toBe(2);
-
-        expect(getSlugs(byFavorited.body.articles)).toEqual([
-            articleC.slug,
-            articleA.slug,
-        ]);
-
-        // 11. Combine all three filters using AND.
-        const combined = await request(server)
-            .get(url)
-            .query({
-                tag: nestjsTag,
-                author: alice.username,
-                favorited: charlie.username,
-            })
-            .expect(200);
-
-        expect(combined.body.articlesCount).toBe(1);
-
-        expect(getSlugs(combined.body.articles)).toEqual([
-            articleA.slug,
-        ]);
-
-        // 12. Pagination: first page.
-        const firstPage = await request(server)
-            .get(url)
-            .query({
-                tag: scopeTag,
-                limit: 2,
-                offset: 0,
-            })
-            .expect(200);
-
-        expect(firstPage.body.articlesCount).toBe(4);
-
-        expect(getSlugs(firstPage.body.articles)).toEqual([
-            articleD.slug,
-            articleC.slug,
-        ]);
-
-        // 13. Pagination: second page.
-        const secondPage = await request(server)
-            .get(url)
-            .query({
-                tag: scopeTag,
-                limit: 2,
-                offset: 2,
-            })
-            .expect(200);
-
-        expect(secondPage.body.articlesCount).toBe(4);
-
-        expect(getSlugs(secondPage.body.articles)).toEqual([
-            articleB.slug,
-            articleA.slug,
-        ]);
-
-        // 14. Offset beyond the last matching article.
-        const emptyPage = await request(server)
-            .get(url)
-            .query({
-                tag: scopeTag,
-                limit: 2,
-                offset: 10,
-            })
-            .expect(200);
-
-        expect(emptyPage.body.articles).toEqual([]);
-        expect(emptyPage.body.articlesCount).toBe(4);
-
-        // 15. No matching filter.
-        const noMatches = await request(server)
-            .get(url)
-            .query({
-                tag: `missing_${suffix}`,
-            })
-            .expect(200);
-
-        expect(noMatches.body.articles).toEqual([]);
-        expect(noMatches.body.articlesCount).toBe(0);
-
-        // 16. Authenticated viewer state.
-        const personalized = await request(server)
-            .get(url)
-            .set('Authorization', charlie.authorization)
-            .query({
-                tag: scopeTag,
-            })
-            .expect(200);
-
-        expect(personalized.body.articlesCount).toBe(4);
-
-        expect(personalized.body.articles).toMatchObject([
-            {
-                slug: articleD.slug,
-                favorited: false,
-                favoritesCount: 0,
-                author: {
-                    username: bob.username,
-                    following: false,
-                },
-            },
-            {
-                slug: articleC.slug,
-                favorited: true,
-                favoritesCount: 1,
-                author: {
-                    username: bob.username,
-                    following: false,
-                },
-            },
-            {
-                slug: articleB.slug,
-                favorited: false,
-                favoritesCount: 1,
-                author: {
-                    username: alice.username,
-                    following: true,
-                },
-            },
-            {
-                slug: articleA.slug,
-                favorited: true,
-                favoritesCount: 1,
-                author: {
-                    username: alice.username,
-                    following: true,
-                },
-            },
-        ]);
-
-        // 17. Verify tag mapping.
-        const itemA = personalized.body.articles.find(
-            (item: { slug: string }) =>
-                item.slug === articleA.slug,
-        );
-
-        expect(itemA?.tagList).toEqual(
-            [scopeTag, nestjsTag, backendTag].sort(),
-        );
-
-        // 18. Invalid supplied JWT.
-        await request(server)
-            .get(url)
-            .set('Authorization', 'Bearer invalid.token')
-            .expect(401);
-
-        // 19. Invalid query parameters.
-        const invalidQueries = [
-            'limit=0',
-            'limit=101',
-            'limit=-1',
-            'limit=1.5',
-            'limit=abc',
-            'offset=-1',
-            'offset=100001',
-            'offset=1.5',
-            'offset=abc',
-            'tag=',
-            'author=',
-            'favorited=',
-            'unknown=value',
-        ];
-
-        for (const query of invalidQueries) {
-            await request(server)
-                .get(`${url}?${query}`)
-                .expect(400);
-        }
     }, 40000);
 
+    it('filters articles by tag regardless of case', async () => {
+        const f = await fixture();
+        const response = await request(f.server)
+            .get(url).query({ tag: f.nestjsTag.toUpperCase() }).expect(200);
+
+        expect(response.body.articlesCount).toBe(2);
+        expect(getSlugs(response.body.articles)).toEqual([
+            f.articleC.slug, f.articleA.slug,
+        ]);
+    }, 40000);
+
+    it('filters articles by author username', async () => {
+        const f = await fixture();
+        const response = await request(f.server)
+            .get(url).query({ author: f.alice.username }).expect(200);
+
+        expect(response.body.articlesCount).toBe(2);
+        expect(getSlugs(response.body.articles)).toEqual([
+            f.articleB.slug, f.articleA.slug,
+        ]);
+    }, 40000);
+
+    it('filters articles by the username that favorited them', async () => {
+        const f = await fixture();
+        const response = await request(f.server)
+            .get(url).query({ favorited: f.charlie.username }).expect(200);
+
+        expect(response.body.articlesCount).toBe(2);
+        expect(getSlugs(response.body.articles)).toEqual([
+            f.articleC.slug, f.articleA.slug,
+        ]);
+    }, 40000);
+
+    it('combines tag, author and favorited filters using AND', async () => {
+        const f = await fixture();
+        const response = await request(f.server)
+            .get(url)
+            .query({
+                tag: f.nestjsTag,
+                author: f.alice.username,
+                favorited: f.charlie.username,
+            })
+            .expect(200);
+
+        expect(response.body.articlesCount).toBe(1);
+        expect(getSlugs(response.body.articles)).toEqual([f.articleA.slug]);
+    }, 40000);
+
+    it.each([0, 2])('paginates articles with limit 2 and offset %i while retaining total count', async (offset) => {
+        const f = await fixture();
+        const expected = [f.articleD.slug, f.articleC.slug, f.articleB.slug, f.articleA.slug];
+        const response = await request(f.server)
+            .get(url).query({ tag: f.scopeTag, limit: 2, offset }).expect(200);
+
+        expect(response.body.articlesCount).toBe(4);
+        expect(getSlugs(response.body.articles)).toEqual(expected.slice(offset, offset + 2));
+    }, 40000);
+
+    it('returns an empty page but retains the total count beyond the last offset', async () => {
+        const f = await fixture();
+        const response = await request(f.server)
+            .get(url).query({ tag: f.scopeTag, limit: 2, offset: 10 }).expect(200);
+
+        expect(response.body.articles).toEqual([]);
+        expect(response.body.articlesCount).toBe(4);
+    }, 40000);
+
+    it('returns zero articles and zero total for a nonmatching filter', async () => {
+        const { server } = context();
+        const missingTag = `missing_${randomUUID().replaceAll('-', '')}`;
+        const response = await request(server)
+            .get(url).query({ tag: missingTag }).expect(200);
+
+        expect(response.body.articles).toEqual([]);
+        expect(response.body.articlesCount).toBe(0);
+    }, 40000);
+
+    it('maps favorites, follow state and tag names for an authenticated viewer', async () => {
+        const f = await fixture();
+        const response = await request(f.server)
+            .get(url)
+            .set('Authorization', f.charlie.authorization)
+            .query({ tag: f.scopeTag })
+            .expect(200);
+
+        expect(response.body.articlesCount).toBe(4);
+        expect(response.body.articles).toMatchObject([
+            {
+                slug: f.articleD.slug, favorited: false, favoritesCount: 0,
+                author: { username: f.bob.username, following: false },
+            },
+            {
+                slug: f.articleC.slug, favorited: true, favoritesCount: 1,
+                author: { username: f.bob.username, following: false },
+            },
+            {
+                slug: f.articleB.slug, favorited: false, favoritesCount: 1,
+                author: { username: f.alice.username, following: true },
+            },
+            {
+                slug: f.articleA.slug, favorited: true, favoritesCount: 1,
+                author: { username: f.alice.username, following: true },
+            },
+        ]);
+        const itemA = response.body.articles.find(
+            (item: { slug: string }) => item.slug === f.articleA.slug,
+        );
+        expect(itemA?.tagList).toEqual([f.scopeTag, f.nestjsTag, f.backendTag].sort());
+    }, 40000);
+
+    it('rejects an invalid supplied JWT on the public listing endpoint', async () => {
+        const { server } = context();
+        await request(server).get(url)
+            .set('Authorization', 'Bearer invalid.token').expect(401);
+    }, 40000);
+
+    it.each([
+        'limit=0', 'limit=101', 'limit=-1', 'limit=1.5', 'limit=abc',
+        'offset=-1', 'offset=100001', 'offset=1.5', 'offset=abc',
+        'tag=', 'author=', 'favorited=', 'unknown=value',
+    ])('rejects invalid listing query: %s', async (query) => {
+        const { server } = context();
+        await request(server).get(`${url}?${query}`).expect(400);
+    }, 40000);
 });

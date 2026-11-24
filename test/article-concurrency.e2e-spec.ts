@@ -6,7 +6,7 @@ import {
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
-import { DataSource, In, EntityManager } from 'typeorm';
+import { DataSource, In, type EntityManager } from 'typeorm';
 import {
     afterAll,
     beforeAll,
@@ -20,39 +20,18 @@ import { User } from '../src/users/entities/user.entity.js';
 import { Article } from '../src/articles/entities/article.entity.js';
 import { Tag } from '../src/articles/entities/tag.entity.js';
 import { ArticleTag } from '../src/articles/entities/article-tag.entity.js';
+
 import { ArticleFavorite } from '../src/articles/entities/article-favorite.entity.js';
 import { ArticlesService } from '../src/articles/articles.service.js';
+
 describe('Article Concurrency E2E', () => {
     let app: INestApplication | undefined;
     let databaseVerified = false;
 
-    const createdUsers: Array<{
-        id: string;
-        email: string;
-    }> = [];
-
-    const suffix = randomUUID()
-        .replaceAll('-', '')
-        .slice(0, 16);
-
+    const createdUsers: Array<{ id: string; email: string }> = [];
+    const createdTags = new Set<string>();
+    const suiteSuffix = randomUUID().replaceAll('-', '').slice(0, 8);
     const password = 'ExamplePass123!';
-
-    const ownerUsername = `tx_owner_${suffix}`;
-    const otherUsername = `tx_other_${suffix}`;
-
-    const initialTag = `tx_initial_${suffix}`;
-    const tagA = `tx_nestjs_${suffix}`;
-    const tagB = `tx_typescript_${suffix}`;
-    const sharedTag = `tx_shared_${suffix}`;
-
-    const rollbackTag = `tx_rollback_${suffix}`;
-
-    const testTags = [
-        initialTag,
-        tagA,
-        tagB,
-        sharedTag,
-    ];
 
     beforeAll(async () => {
         const env = process.env;
@@ -69,17 +48,13 @@ describe('Article Concurrency E2E', () => {
             throw new Error('Unsafe E2E environment');
         }
 
-        const { AppModule } = await import(
-            '../src/app.module.js'
-        );
-
+        const { AppModule } = await import('../src/app.module.js');
         const moduleRef = await Test.createTestingModule({
             imports: [AppModule],
         }).compile();
 
         app = moduleRef.createNestApplication();
         app.setGlobalPrefix('api');
-
         app.useGlobalPipes(
             new ValidationPipe({
                 whitelist: true,
@@ -90,18 +65,16 @@ describe('Article Concurrency E2E', () => {
 
         await app.listen(0, '127.0.0.1');
 
-        const rows = (await app
-            .get(DataSource)
-            .query(`
-        SELECT
-          DATABASE() AS db,
-          CURRENT_USER() AS dbUser,
-          @@server_uuid AS serverUuid
-      `)) as Array<{
-                db: string;
-                dbUser: string;
-                serverUuid: string;
-            }>;
+        const rows = (await app.get(DataSource).query(`
+            SELECT
+                DATABASE() AS db,
+                CURRENT_USER() AS dbUser,
+                @@server_uuid AS serverUuid
+        `)) as Array<{
+            db: string;
+            dbUser: string;
+            serverUuid: string;
+        }>;
 
         const identity = rows[0];
 
@@ -110,9 +83,7 @@ describe('Article Concurrency E2E', () => {
             !identity.dbUser.startsWith('medium_test_user@') ||
             identity.serverUuid !== env.DB_TEST_SERVER_UUID
         ) {
-            throw new Error(
-                'E2E database identity verification failed',
-            );
+            throw new Error('E2E database identity verification failed');
         }
 
         databaseVerified = true;
@@ -125,8 +96,8 @@ describe('Article Concurrency E2E', () => {
             if (databaseVerified) {
                 const db = app.get(DataSource);
 
-                // Delete only users created by this test.
-                // Their articles and article-tag links cascade.
+                // Only remove users registered by this suite.
+                // Their article records and relationships cascade.
                 for (const user of createdUsers) {
                     await db.getRepository(User).delete({
                         id: user.id,
@@ -134,424 +105,282 @@ describe('Article Concurrency E2E', () => {
                     });
                 }
 
-                // Delete only this test's uniquely named tags.
-                await db.getRepository(Tag).delete({
-                    name: In(testTags),
-                });
+                // Only remove uniquely generated tags from this suite.
+                if (createdTags.size > 0) {
+                    await db.getRepository(Tag).delete({
+                        name: In([...createdTags]),
+                    });
+                }
             }
         } finally {
             await app.close();
         }
     }, 20000);
 
-
-    it('preserves article consistency under concurrent writes', async () => {
+    function context() {
         if (!app || !databaseVerified) {
             throw new Error('Test app is not ready');
         }
+        return {
+            server: app.getHttpServer(),
+            db: app.get(DataSource),
+        };
+    }
 
-        const server = app.getHttpServer();
-        const db = app.get(DataSource);
+    function makeTag(prefix: string): string {
+        const value = `${prefix}_${suiteSuffix}_${randomUUID().replaceAll('-', '').slice(0, 10)}`;
+        createdTags.add(value);
+        return value;
+    }
 
-        const articlesRepository =
-            db.getRepository(Article);
-
-        const tagsRepository =
-            db.getRepository(Tag);
-
-        const linksRepository =
-            db.getRepository(ArticleTag);
-
-        async function registerUser(username: string) {
-            const email = `${username}@example.com`;
-
-            const registered = await request(server)
-                .post('/api/users')
-                .send({ email, username, password })
-                .expect(201);
-
-            const id = registered.body.user.id as string;
-            createdUsers.push({ id, email });
-
-            const login = await request(server)
-                .post('/api/users/login')
-                .send({ email, password })
-                .expect(200);
-
-            return {
-                id,
-                authorization:
-                    `Bearer ${login.body.accessToken as string}`,
-            };
-        }
-
-        // 1. Create two users.
-        const owner = await registerUser(ownerUsername);
-        const other = await registerUser(otherUsername);
-
-        // 2. Create one article.
-        const created = await request(server)
-            .post('/api/articles')
-            .set('Authorization', owner.authorization)
-            .send({
-                article: {
-                    title: 'Transaction Concurrency Test',
-                    description: 'Initial description',
-                    body: 'Initial body',
-                    tagList: [initialTag],
-                },
-            })
-            .expect(201);
-
-        const slug = created.body.article.slug as string;
-        const articleUrl = `/api/articles/${slug}`;
-
-        const article = await articlesRepository
-            .findOneByOrFail({ slug });
-
-        const originalCreatedAt =
-            created.body.article.createdAt as string;
-
-        // 3. Unauthorized updates cannot modify the article.
-        await request(server)
-            .put(articleUrl)
-            .set('Authorization', other.authorization)
-            .send({
-                article: {
-                    description: 'Unauthorized modification',
-                    tagList: [tagA],
-                },
-            })
-            .expect(403);
-
-        // 4. Repeat concurrent updates three times.
-        for (let round = 1; round <= 3; round++) {
-            const versionA = {
-                description: `Round ${round} - Version A`,
-                body: `Round ${round} - Body A`,
-                tagList: [tagA, sharedTag],
-            };
-
-            const versionB = {
-                description: `Round ${round} - Version B`,
-                body: `Round ${round} - Body B`,
-                tagList: [tagB, sharedTag],
-            };
-
-            const [responseA, responseB] =
-                await Promise.all([
-                    request(server)
-                        .put(articleUrl)
-                        .set('Authorization', owner.authorization)
-                        .send({ article: versionA })
-                        .expect(200),
-
-                    request(server)
-                        .put(articleUrl)
-                        .set('Authorization', owner.authorization)
-                        .send({ article: versionB })
-                        .expect(200),
-                ]);
-
-            // Each response must represent its own update.
-            expect(responseA.body.article).toMatchObject({
-                description: versionA.description,
-                body: versionA.body,
-                tagList: [...versionA.tagList].sort(),
-            });
-
-            expect(responseB.body.article).toMatchObject({
-                description: versionB.description,
-                body: versionB.body,
-                tagList: [...versionB.tagList].sort(),
-            });
-
-            // 5. Read final article state.
-            const detail = await request(server)
-                .get(articleUrl)
-                .expect(200);
-
-            const actual = detail.body.article;
-
-            // Last transaction to commit may be A or B.
-            const finalVersion =
-                actual.description === versionA.description
-                    ? versionA
-                    : versionB;
-
-            // But all fields must belong to that version.
-            expect(actual.description)
-                .toBe(finalVersion.description);
-
-            expect(actual.body)
-                .toBe(finalVersion.body);
-
-            expect(actual.tagList)
-                .toEqual([...finalVersion.tagList].sort());
-
-            expect(actual.createdAt)
-                .toBe(originalCreatedAt);
-
-            // 6. Verify persisted article state.
-            const stored = await articlesRepository
-                .findOneByOrFail({ id: article.id });
-
-            expect(stored.description)
-                .toBe(finalVersion.description);
-
-            expect(stored.body)
-                .toBe(finalVersion.body);
-
-            // 7. Verify article-tag relationships.
-            const links = await linksRepository.findBy({
-                articleId: article.id,
-            });
-
-            expect(links).toHaveLength(2);
-
-            const tagRows = await tagsRepository.findBy({
-                id: In(links.map((link) => link.tagId)),
-            });
-
-            expect(
-                tagRows.map((tag) => tag.name).sort(),
-            ).toEqual([...finalVersion.tagList].sort());
-        }
-
-        // 8. Favorite and Update operate concurrently.
-        const favoriteUrl = `${articleUrl}/favorite`;
-
-        const [favoriteResponse, updateResponse] =
-            await Promise.all([
-                request(server)
-                    .post(favoriteUrl)
-                    .set('Authorization', other.authorization)
-                    .expect(200),
-
-                request(server)
-                    .put(articleUrl)
-                    .set('Authorization', owner.authorization)
-                    .send({
-                        article: {
-                            description: 'After concurrent favorite',
-                            body: 'Final article body',
-                            tagList: [initialTag],
-                        },
-                    })
-                    .expect(200),
-            ]);
-
-        expect(favoriteResponse.body.article.favorited)
-            .toBe(true);
-
-        expect(updateResponse.body.article.description)
-            .toBe('After concurrent favorite');
-
-        // 9. Verify final combined state.
-        const finalDetail = await request(server)
-            .get(articleUrl)
-            .set('Authorization', other.authorization)
-            .expect(200);
-
-        expect(finalDetail.body.article).toMatchObject({
-            description: 'After concurrent favorite',
-            body: 'Final article body',
-            tagList: [initialTag],
-            favorited: true,
-            favoritesCount: 1,
-        });
-
-        expect(
-            await db.getRepository(ArticleFavorite).countBy({
-                articleId: article.id,
-                userId: other.id,
-            }),
-        ).toBe(1);
-
-        const finalLinks = await linksRepository.findBy({
-            articleId: article.id,
-        });
-
-        expect(finalLinks).toHaveLength(1);
-
-        const finalTag = await tagsRepository
-            .findOneByOrFail({ id: finalLinks[0].tagId });
-
-        expect(finalTag.name).toBe(initialTag);
-
-        // No explicit deletion is needed here.
-        // afterAll removes this test's users and tags.
-    }, 40000);
-
-    it('rolls back article and tag changes after an injected failure', async () => {
-        if (!app || !databaseVerified) {
-            throw new Error('Test app is not ready');
-        }
-
-        const server = app.getHttpServer();
-        const db = app.get(DataSource);
-
-        const articles = db.getRepository(Article);
-        const tags = db.getRepository(Tag);
-        const links = db.getRepository(ArticleTag);
-
-        // 1. Create an independent test user.
-        const username = `tx_rollback_user_${suffix}`;
+    async function registerUser() {
+        const { server } = context();
+        const identity = `${suiteSuffix}_${randomUUID().replaceAll('-', '').slice(0, 10)}`;
+        const username = `tx_${identity}`;
         const email = `${username}@example.com`;
-
         const registration = await request(server)
             .post('/api/users')
             .send({ email, username, password })
             .expect(201);
 
-        const userId = registration.body.user.id as string;
-        createdUsers.push({ id: userId, email });
+        const id = registration.body.user.id as string;
+        createdUsers.push({ id, email });
 
         const login = await request(server)
             .post('/api/users/login')
             .send({ email, password })
             .expect(200);
 
-        const authorization =
-            `Bearer ${login.body.accessToken as string}`;
-
-        // 2. Create an article with one initial tag.
-        const created = await request(server)
-            .post('/api/articles')
-            .set('Authorization', authorization)
-            .send({
-                article: {
-                    title: 'Rollback Original Article',
-                    description: 'Original description',
-                    body: 'Original body',
-                    tagList: [initialTag],
-                },
-            })
-            .expect(201);
-
-        const slug = created.body.article.slug as string;
-        const articleUrl = `/api/articles/${slug}`;
-
-        const before = await articles.findOneByOrFail({
-            slug,
-        });
-
-        expect(
-            await tags.existsBy({ name: rollbackTag }),
-        ).toBe(false);
-
-        // 3. Obtain the actual service instance.
-        // The cast exposes the private method to
-        // this test without changing production code.
-        const service = app.get(ArticlesService) as unknown as {
-            replaceArticleTags: (
-                manager: EntityManager,
-                articleId: string,
-                names: string[],
-            ) => Promise<void>;
+        return {
+            id,
+            authorization: `Bearer ${login.body.accessToken as string}`,
         };
+    }
 
-        const originalReplace =
-            service.replaceArticleTags.bind(service);
+    type Actor = Awaited<ReturnType<typeof registerUser>>;
 
-        let failurePointReached = false;
+    async function createArticle(
+        owner: Actor,
+        tagList: string[],
+        title = 'Transaction Concurrency Test',
+    ) {
+        const { server, db } = context();
+        const input = {
+            title,
+            description: 'Original description',
+            body: 'Original body',
+            tagList,
+        };
+        const response = await request(server)
+            .post('/api/articles')
+            .set('Authorization', owner.authorization)
+            .send({ article: input })
+            .expect(201);
+        const slug = response.body.article.slug as string;
+        const saved = await db.getRepository(Article).findOneByOrFail({ slug });
+        return { saved, slug, url: `/api/articles/${slug}`, input, response };
+    }
 
-        // 4. Inject a failure AFTER the real helper
-        // completes its database write operations.
-        const spy = vi
-            .spyOn(service, 'replaceArticleTags')
-            .mockImplementation(
-                async (manager, articleId, names) => {
-                    await originalReplace(
-                        manager,
-                        articleId,
-                        names,
-                    );
+    async function fixture() {
+        const { server, db } = context();
+        const owner = await registerUser();
+        const initialTag = makeTag('tx_initial');
+        const article = await createArticle(owner, [initialTag]);
+        return { server, db, owner, initialTag, ...article };
+    }
 
-                    failurePointReached = true;
+    async function storedTags(articleId: string) {
+        const { db } = context();
+        const links = await db.getRepository(ArticleTag).findBy({ articleId });
+        const tags = links.length === 0 ? [] : await db.getRepository(Tag).findBy({
+            id: In(links.map((link) => link.tagId)),
+        });
+        expect(tags).toHaveLength(links.length);
+        return { links, names: tags.map((tag) => tag.name).sort() };
+    }
 
-                    throw new InternalServerErrorException(
-                        'E2E forced rollback',
-                    );
-                },
-            );
+    it('rejects an unauthorized update without changing article data or tags', async () => {
+        const f = await fixture();
+        const other = await registerUser();
+        const unauthorizedTag = makeTag('tx_unauthorized');
+        await request(f.server).put(f.url)
+            .set('Authorization', other.authorization)
+            .send({ article: { description: 'Unauthorized modification', tagList: [unauthorizedTag] } })
+            .expect(403);
+        const stored = await f.db.getRepository(Article).findOneByOrFail({ id: f.saved.id });
+        expect(stored).toMatchObject({
+            slug: f.slug, title: f.input.title, description: f.input.description, body: f.input.body,
+        });
+        expect((await storedTags(f.saved.id)).names).toEqual([f.initialTag]);
+        expect(await f.db.getRepository(Tag).existsBy({ name: unauthorizedTag })).toBe(false);
+    }, 30000);
 
-        try {
-            // 5. Attempt to modify article fields and tags.
-            const failedUpdate = await request(server)
-                .put(articleUrl)
-                .set('Authorization', authorization)
-                .send({
-                    article: {
-                        title: 'Rollback Modified Article',
-                        description: 'Changed description',
-                        body: 'Changed body',
-                        tagList: [rollbackTag],
-                    },
-                })
-                .expect(500);
+    it('preserves a complete article version under concurrent updates', async () => {
+        const f = await fixture();
+        const tagA = makeTag('tx_nestjs');
+        const tagB = makeTag('tx_typescript');
+        const sharedTag = makeTag('tx_shared');
+        const originalCreatedAt = f.response.body.article.createdAt as string;
 
-            expect(failedUpdate.body).toMatchObject({
-                statusCode: 500,
-                message: 'E2E forced rollback',
+        for (let round = 1; round <= 3; round++) {
+            const versionA = {
+                description: `Round ${round} - Version A`,
+                body: `Round ${round} - Body A`,
+                tagList: [tagA, sharedTag],
+            };
+            const versionB = {
+                description: `Round ${round} - Version B`,
+                body: `Round ${round} - Body B`,
+                tagList: [tagB, sharedTag],
+            };
+            const [responseA, responseB] = await Promise.all([
+                request(f.server).put(f.url).set('Authorization', f.owner.authorization)
+                    .send({ article: versionA }),
+                request(f.server).put(f.url).set('Authorization', f.owner.authorization)
+                    .send({ article: versionB }),
+            ]);
+            expect(responseA.status).toBe(200);
+            expect(responseB.status).toBe(200);
+            expect(responseA.body.article).toMatchObject({ ...versionA, tagList: [...versionA.tagList].sort() });
+            expect(responseB.body.article).toMatchObject({ ...versionB, tagList: [...versionB.tagList].sort() });
+
+            const detail = await request(f.server).get(f.url).expect(200);
+            const actual = detail.body.article;
+            const finalVersion = actual.description === versionA.description ? versionA : versionB;
+            expect(actual).toMatchObject({
+                ...finalVersion, tagList: [...finalVersion.tagList].sort(), createdAt: originalCreatedAt,
             });
+            const stored = await f.db.getRepository(Article).findOneByOrFail({ id: f.saved.id });
+            expect(stored).toMatchObject({ description: finalVersion.description, body: finalVersion.body });
+            const tags = await storedTags(f.saved.id);
+            expect(tags.links).toHaveLength(2);
+            expect(tags.names).toEqual([...finalVersion.tagList].sort());
+        }
+    }, 40000);
 
+    it('preserves both article changes and favorite state during concurrent writes', async () => {
+        const f = await fixture();
+        const other = await registerUser();
+        const newTag = makeTag('tx_final');
+        const changes = {
+            description: 'After concurrent favorite',
+            body: 'Final article body',
+            tagList: [newTag],
+        };
+        const [favoriteResponse, updateResponse] = await Promise.all([
+            request(f.server).post(`${f.url}/favorite`).set('Authorization', other.authorization),
+            request(f.server).put(f.url).set('Authorization', f.owner.authorization)
+                .send({ article: changes }),
+        ]);
+        expect(favoriteResponse.status).toBe(200);
+        expect(updateResponse.status).toBe(200);
+        expect(favoriteResponse.body.article.favorited).toBe(true);
+        expect(updateResponse.body.article).toMatchObject(changes);
+        const detail = await request(f.server).get(f.url)
+            .set('Authorization', other.authorization).expect(200);
+        expect(detail.body.article).toMatchObject({ ...changes, favorited: true, favoritesCount: 1 });
+        expect(await f.db.getRepository(ArticleFavorite).countBy({ articleId: f.saved.id, userId: other.id })).toBe(1);
+        expect((await storedTags(f.saved.id)).names).toEqual([newTag]);
+    }, 30000);
+
+    it('reuses canonical tag IDs during concurrent create and update on different articles', async () => {
+        const f = await fixture();
+        const other = await registerUser();
+        const sharedA = makeTag('tx_shared_a');
+        const sharedB = makeTag('tx_shared_b');
+        const createOnly = makeTag('tx_create');
+        const updateOnly = makeTag('tx_update');
+        const createInput = {
+            title: 'Concurrent Create Article',
+            description: 'Concurrent create description',
+            body: 'Concurrent create body',
+            tagList: [sharedB, createOnly, sharedA],
+        };
+        const updateInput = {
+            description: 'Concurrent update description',
+            tagList: [sharedA, updateOnly, sharedB],
+        };
+        const tags = f.db.getRepository(Tag);
+        expect(await tags.countBy({ name: In([sharedA, sharedB]) })).toBe(0);
+        const [created, updated] = await Promise.all([
+            request(f.server).post('/api/articles').set('Authorization', other.authorization)
+                .send({ article: createInput }),
+            request(f.server).put(f.url).set('Authorization', f.owner.authorization)
+                .send({ article: updateInput }),
+        ]);
+        expect(created.status).toBe(201);
+        expect(updated.status).toBe(200);
+        const createSlug = created.body.article.slug as string;
+        const createTags = [...createInput.tagList].sort();
+        const updateTags = [...updateInput.tagList].sort();
+        expect(created.body.article).toMatchObject({ ...createInput, tagList: createTags });
+        expect(updated.body.article).toMatchObject({ ...updateInput, slug: f.slug, tagList: updateTags });
+
+        const newArticle = await f.db.getRepository(Article).findOneByOrFail({ slug: createSlug });
+        expect(newArticle.authorId).toBe(other.id);
+        expect(newArticle.id).not.toBe(f.saved.id);
+        const createdLinks = await storedTags(newArticle.id);
+        const updatedLinks = await storedTags(f.saved.id);
+        expect(createdLinks.names).toEqual(createTags);
+        expect(updatedLinks.names).toEqual(updateTags);
+        const canonical = await tags.findBy({ name: In([sharedA, sharedB]) });
+        expect(canonical).toHaveLength(2);
+        const commonIds = createdLinks.links.map((link) => link.tagId)
+            .filter((id) => updatedLinks.links.some((link) => link.tagId === id)).sort();
+        expect(commonIds).toEqual(canonical.map((tag) => tag.id).sort());
+        const createDetail = await request(f.server).get(`/api/articles/${createSlug}`).expect(200);
+        const updateDetail = await request(f.server).get(f.url).expect(200);
+        expect(createDetail.body.article.tagList).toEqual(createTags);
+        expect(updateDetail.body.article.tagList).toEqual(updateTags);
+        expect(await f.db.getRepository(Article).countBy({ authorId: other.id })).toBe(1);
+        expect(await f.db.getRepository(Article).countBy({ authorId: f.owner.id })).toBe(1);
+    }, 40000);
+
+    it('rolls back article and tag changes after an injected failure', async () => {
+        const f = await fixture();
+        const rollbackTag = makeTag('tx_rollback');
+        const tags = f.db.getRepository(Tag);
+        expect(await tags.existsBy({ name: rollbackTag })).toBe(false);
+        const beforeLinks = (await storedTags(f.saved.id)).links;
+        const service = app!.get(ArticlesService) as unknown as {
+            replaceArticleTags: (manager: EntityManager, articleId: string, names: string[]) => Promise<void>;
+        };
+        const original = service.replaceArticleTags.bind(service);
+        let failurePointReached = false;
+        const spy = vi.spyOn(service, 'replaceArticleTags').mockImplementation(async (manager, articleId, names) => {
+            await original(manager, articleId, names);
+            failurePointReached = true;
+            throw new InternalServerErrorException('E2E forced rollback');
+        });
+        try {
+            const failed = await request(f.server).put(f.url)
+                .set('Authorization', f.owner.authorization)
+                .send({ article: {
+                    title: 'Rollback Modified Article',
+                    description: 'Changed description',
+                    body: 'Changed body',
+                    tagList: [rollbackTag],
+                } })
+                .expect(500);
+            expect(failed.body).toMatchObject({ statusCode: 500, message: 'E2E forced rollback' });
             expect(failurePointReached).toBe(true);
             expect(spy).toHaveBeenCalledOnce();
         } finally {
-            // Always restore the service, even if
-            // an assertion or request fails.
             spy.mockRestore();
         }
-
-        // 6. Verify all Article fields were rolled back.
-        const after = await articles.findOneByOrFail({
-            id: before.id,
+        const after = await f.db.getRepository(Article).findOneByOrFail({ id: f.saved.id });
+        expect(after).toMatchObject({
+            slug: f.saved.slug, title: f.saved.title, description: f.saved.description,
+            body: f.saved.body, authorId: f.saved.authorId,
         });
-
-        expect(after.slug).toBe(before.slug);
-        expect(after.title).toBe(before.title);
-        expect(after.description).toBe(before.description);
-        expect(after.body).toBe(before.body);
-
-        expect(after.createdAt.getTime())
-            .toBe(before.createdAt.getTime());
-
-        expect(after.updatedAt.getTime())
-            .toBe(before.updatedAt.getTime());
-
-        // 7. Verify the original article-tag link remains.
-        const savedLinks = await links.findBy({
-            articleId: before.id,
-        });
-
-        expect(savedLinks).toHaveLength(1);
-
-        const savedTag = await tags.findOneByOrFail({
-            id: savedLinks[0].tagId,
-        });
-
-        expect(savedTag.name).toBe(initialTag);
-
-        // 8. Verify the newly inserted tag was rolled back.
-        expect(
-            await tags.existsBy({ name: rollbackTag }),
-        ).toBe(false);
-
-        // 9. Confirm the public API returns the original state.
-        const detail = await request(server)
-            .get(articleUrl)
-            .expect(200);
-
-        expect(detail.body.article).toMatchObject({
-            slug,
-            title: 'Rollback Original Article',
-            description: 'Original description',
-            body: 'Original body',
-            tagList: [initialTag],
-        });
-
+        expect(after.createdAt.getTime()).toBe(f.saved.createdAt.getTime());
+        expect(after.updatedAt.getTime()).toBe(f.saved.updatedAt.getTime());
+        const afterTags = await storedTags(f.saved.id);
+        expect(afterTags.names).toEqual([f.initialTag]);
+        expect(afterTags.links.map((link) => link.tagId).sort())
+            .toEqual(beforeLinks.map((link) => link.tagId).sort());
+        expect(await tags.existsBy({ name: rollbackTag })).toBe(false);
+        const detail = await request(f.server).get(f.url).expect(200);
+        expect(detail.body.article).toMatchObject({ slug: f.slug, ...f.input });
     }, 30000);
-
-
 });

@@ -1,4 +1,3 @@
-
 import {
     type INestApplication,
     ValidationPipe,
@@ -19,32 +18,17 @@ import { User } from '../src/users/entities/user.entity.js';
 import { Article } from '../src/articles/entities/article.entity.js';
 import { Tag } from '../src/articles/entities/tag.entity.js';
 import { ArticleTag } from '../src/articles/entities/article-tag.entity.js';
+
 import { ArticleFavorite } from '../src/articles/entities/article-favorite.entity.js';
 
 describe('Article Delete E2E', () => {
     let app: INestApplication | undefined;
     let databaseVerified = false;
 
-    const createdUsers: Array<{
-        id: string;
-        email: string;
-    }> = [];
-
-    const suffix = randomUUID()
-        .replaceAll('-', '')
-        .slice(0, 16);
-
-    const ownerEmail = `e2e-delete-owner-${suffix}@example.com`;
-    const otherEmail = `e2e-delete-other-${suffix}@example.com`;
-
-    const ownerUsername = `edit_owner_${suffix}`;
-    const otherUsername = `edit_other_${suffix}`;
-
+    const createdUsers: Array<{ id: string; email: string }> = [];
+    const createdTags = new Set<string>();
+    const suiteSuffix = randomUUID().replaceAll('-', '').slice(0, 8);
     const password = 'ExamplePass123!';
-
-    const oldTag = `nestjs_${suffix}`;
-    const keptTag = `backend_${suffix}`;
-    const newTag = `typescript_${suffix}`;
 
     beforeAll(async () => {
         const env = process.env;
@@ -61,17 +45,13 @@ describe('Article Delete E2E', () => {
             throw new Error('Unsafe E2E environment');
         }
 
-        const { AppModule } = await import(
-            '../src/app.module.js'
-        );
-
+        const { AppModule } = await import('../src/app.module.js');
         const moduleRef = await Test.createTestingModule({
             imports: [AppModule],
         }).compile();
 
         app = moduleRef.createNestApplication();
         app.setGlobalPrefix('api');
-
         app.useGlobalPipes(
             new ValidationPipe({
                 whitelist: true,
@@ -83,11 +63,11 @@ describe('Article Delete E2E', () => {
         await app.init();
 
         const rows = (await app.get(DataSource).query(`
-      SELECT
-        DATABASE() AS db,
-        CURRENT_USER() AS dbUser,
-        @@server_uuid AS serverUuid
-    `)) as Array<{
+            SELECT
+                DATABASE() AS db,
+                CURRENT_USER() AS dbUser,
+                @@server_uuid AS serverUuid
+        `)) as Array<{
             db: string;
             dbUser: string;
             serverUuid: string;
@@ -100,9 +80,7 @@ describe('Article Delete E2E', () => {
             !identity.dbUser.startsWith('medium_test_user@') ||
             identity.serverUuid !== env.DB_TEST_SERVER_UUID
         ) {
-            throw new Error(
-                'E2E database identity verification failed',
-            );
+            throw new Error('E2E database identity verification failed');
         }
 
         databaseVerified = true;
@@ -115,8 +93,8 @@ describe('Article Delete E2E', () => {
             if (databaseVerified) {
                 const db = app.get(DataSource);
 
-                // Only remove users created by this test.
-                // FK cascades remove their articles and links.
+                // Only remove users registered by this suite.
+                // Their article records and relationships cascade.
                 for (const user of createdUsers) {
                     await db.getRepository(User).delete({
                         id: user.id,
@@ -124,254 +102,224 @@ describe('Article Delete E2E', () => {
                     });
                 }
 
-                // Remove only this test's uniquely named tags.
-                await db.getRepository(Tag).delete({
-                    name: In([oldTag, keptTag, newTag]),
-                });
+                // Only remove uniquely generated tags from this suite.
+                if (createdTags.size > 0) {
+                    await db.getRepository(Tag).delete({
+                        name: In([...createdTags]),
+                    });
+                }
             }
         } finally {
             await app.close();
         }
     }, 20000);
 
-
-    it('validates authorization, deletion and cascade constraints', async () => {
+    function context() {
         if (!app || !databaseVerified) {
             throw new Error('Test app is not ready');
         }
+        return {
+            server: app.getHttpServer(),
+            db: app.get(DataSource),
+        };
+    }
 
-        const server = app.getHttpServer();
-        const db = app.get(DataSource);
+    function makeTag(prefix: string): string {
+        const value = `${prefix}_${suiteSuffix}_${randomUUID().replaceAll('-', '').slice(0, 10)}`;
+        createdTags.add(value);
+        return value;
+    }
 
-        const users = db.getRepository(User);
-        const articles = db.getRepository(Article);
-        const tags = db.getRepository(Tag);
-        const articleTags = db.getRepository(ArticleTag);
-        const favorites = db.getRepository(ArticleFavorite);
-
-        // 1. Register the article owner.
-        const ownerRegistration = await request(server)
+    async function registerUser() {
+        const { server } = context();
+        const identity = `${suiteSuffix}_${randomUUID().replaceAll('-', '').slice(0, 10)}`;
+        const username = `del_${identity}`;
+        const email = `${username}@example.com`;
+        const registration = await request(server)
             .post('/api/users')
-            .send({
-                email: ownerEmail,
-                username: ownerUsername,
-                password,
-            })
+            .send({ email, username, password })
             .expect(201);
 
-        const ownerId =
-            ownerRegistration.body.user.id as string;
+        const id = registration.body.user.id as string;
+        createdUsers.push({ id, email });
 
-        createdUsers.push({
-            id: ownerId,
-            email: ownerEmail,
-        });
-
-        // 2. Register another user.
-        const otherRegistration = await request(server)
-            .post('/api/users')
-            .send({
-                email: otherEmail,
-                username: otherUsername,
-                password,
-            })
-            .expect(201);
-
-        const otherId =
-            otherRegistration.body.user.id as string;
-
-        createdUsers.push({
-            id: otherId,
-            email: otherEmail,
-        });
-
-        // 3. Authenticate both users.
-        const ownerLogin = await request(server)
+        const login = await request(server)
             .post('/api/users/login')
-            .send({ email: ownerEmail, password })
+            .send({ email, password })
             .expect(200);
 
-        const otherLogin = await request(server)
-            .post('/api/users/login')
-            .send({ email: otherEmail, password })
-            .expect(200);
+        return {
+            id,
+            authorization: `Bearer ${login.body.accessToken as string}`,
+        };
+    }
 
-        const ownerAuth =
-            `Bearer ${ownerLogin.body.accessToken as string}`;
-
-        const otherAuth =
-            `Bearer ${otherLogin.body.accessToken as string}`;
-
-        // 4. Create the article that will be deleted.
-        const created = await request(server)
+    async function createArticle(
+        authorization: string,
+        title: string,
+        tagList: string[],
+    ) {
+        const { server, db } = context();
+        const response = await request(server)
             .post('/api/articles')
-            .set('Authorization', ownerAuth)
+            .set('Authorization', authorization)
             .send({
                 article: {
-                    title: 'Article to delete',
-                    description: 'Testing article deletion',
-                    body: 'This article will be deleted.',
-                    tagList: [oldTag, keptTag],
+                    title,
+                    description: `Description of ${title}`,
+                    body: `Body of ${title}`,
+                    tagList,
                 },
             })
             .expect(201);
+        const slug = response.body.article.slug as string;
+        return db.getRepository(Article).findOneByOrFail({ slug });
+    }
 
-        const slug = created.body.article.slug as string;
+    async function fixture() {
+        const { server, db } = context();
+        const owner = await registerUser();
+        const oldTag = makeTag('delete_old');
+        const sharedTag = makeTag('delete_shared');
+        const article = await createArticle(
+            owner.authorization,
+            'Article to delete',
+            [oldTag, sharedTag],
+        );
+        expect(article.authorId).toBe(owner.id);
+        return {
+            server, db, owner, article, oldTag, sharedTag,
+            url: `/api/articles/${article.slug}`,
+        };
+    }
 
-        const article = await articles.findOneByOrFail({
-            slug,
-        });
+    it('requires a valid JWT to delete an article', async () => {
+        const { server, db, article, url } = await fixture();
 
-        const url = `/api/articles/${slug}`;
-
-        // 5. Create an unrelated article sharing a tag.
-        const siblingResponse = await request(server)
-            .post('/api/articles')
-            .set('Authorization', otherAuth)
-            .send({
-                article: {
-                    title: 'Article to retain',
-                    description: 'This article must survive',
-                    body: 'Unrelated article content',
-                    tagList: [keptTag],
-                },
-            })
-            .expect(201);
-
-        const siblingArticle =
-            await articles.findOneByOrFail({
-                slug: siblingResponse.body.article.slug as string,
-            });
-
-        // 6. Seed favorites directly because the
-        // Favorite API has not been implemented yet.
-        await favorites.insert([
-            {
-                userId: otherId,
-                articleId: article.id,
-            },
-            {
-                userId: ownerId,
-                articleId: siblingArticle.id,
-            },
-        ]);
-
-        // Verify dependent records exist before deletion.
-        expect(
-            await articleTags.countBy({
-                articleId: article.id,
-            }),
-        ).toBe(2);
-
-        expect(
-            await favorites.countBy({
-                articleId: article.id,
-            }),
-        ).toBe(1);
-
-        // 7. Authentication is required.
-        await request(server)
-            .delete(url)
-            .expect(401);
-
+        await request(server).delete(url).expect(401);
         await request(server)
             .delete(url)
             .set('Authorization', 'Bearer invalid.token')
             .expect(401);
 
-        // 8. Another user cannot delete the article.
+        expect(await db.getRepository(Article).existsBy({
+            id: article.id,
+        })).toBe(true);
+    }, 30000);
+
+    it('forbids a non-author from deleting an article', async () => {
+        const { server, db, article, url } = await fixture();
+        const other = await registerUser();
+
         await request(server)
             .delete(url)
-            .set('Authorization', otherAuth)
+            .set('Authorization', other.authorization)
             .expect(403);
 
-        expect(
-            await articles.existsBy({
-                id: article.id,
-            }),
-        ).toBe(true);
+        expect(await db.getRepository(Article).existsBy({
+            id: article.id,
+        })).toBe(true);
+        expect(await db.getRepository(ArticleTag).countBy({
+            articleId: article.id,
+        })).toBe(2);
+        await request(server).get(url).expect(200);
+    }, 30000);
 
-        // 9. Unknown slug.
+    it('returns 404 when deleting an unknown slug', async () => {
+        const { server } = context();
+        const owner = await registerUser();
+
         await request(server)
             .delete(`/api/articles/missing-${randomUUID()}`)
-            .set('Authorization', ownerAuth)
+            .set('Authorization', owner.authorization)
             .expect(404);
+    }, 30000);
 
-        // 10. The author deletes the article.
+    it('allows the author to delete an article and returns an empty 204 response', async () => {
+        const { server, db, owner, article, url } = await fixture();
+
         const deleted = await request(server)
             .delete(url)
-            .set('Authorization', ownerAuth)
+            .set('Authorization', owner.authorization)
             .expect(204);
-
         expect(deleted.text).toBe('');
 
-        // 11. The article is no longer accessible.
+        expect(await db.getRepository(Article).existsBy({
+            id: article.id,
+        })).toBe(false);
+        await request(server).get(url).expect(404);
         await request(server)
-            .get(url)
+            .delete(url)
+            .set('Authorization', owner.authorization)
             .expect(404);
+    }, 30000);
+
+    it('cascades article-tag links and favorites when deleting an article', async () => {
+        const { server, db, owner, article, url } = await fixture();
+        const other = await registerUser();
+        const links = db.getRepository(ArticleTag);
+        const favorites = db.getRepository(ArticleFavorite);
+
+        // Seed dependent data directly to isolate the deletion contract.
+        await favorites.insert({ userId: other.id, articleId: article.id });
+        expect(await links.countBy({ articleId: article.id })).toBe(2);
+        expect(await favorites.countBy({ articleId: article.id })).toBe(1);
 
         await request(server)
             .delete(url)
-            .set('Authorization', ownerAuth)
-            .expect(404);
+            .set('Authorization', owner.authorization)
+            .expect(204);
 
-        // 12. Verify actual database deletion.
-        expect(
-            await articles.existsBy({
-                id: article.id,
-            }),
-        ).toBe(false);
+        expect(await db.getRepository(Article).existsBy({
+            id: article.id,
+        })).toBe(false);
+        expect(await links.countBy({ articleId: article.id })).toBe(0);
+        expect(await favorites.countBy({ articleId: article.id })).toBe(0);
+    }, 30000);
 
-        // 13. Verify cascading deletes.
-        expect(
-            await articleTags.countBy({
-                articleId: article.id,
-            }),
-        ).toBe(0);
+    it('preserves users, tag records and unrelated articles when deleting an article', async () => {
+        const { server, db, owner, article, url, oldTag, sharedTag } = await fixture();
+        const other = await registerUser();
+        const sibling = await createArticle(
+            other.authorization,
+            'Article to retain',
+            [sharedTag],
+        );
+        const favorites = db.getRepository(ArticleFavorite);
+        const links = db.getRepository(ArticleTag);
+        const tags = db.getRepository(Tag);
 
-        expect(
-            await favorites.countBy({
-                articleId: article.id,
-            }),
-        ).toBe(0);
-
-        // 14. The two users still exist.
-        expect(
-            await users.countBy({
-                id: In([ownerId, otherId]),
-            }),
-        ).toBe(2);
-
-        // 15. Shared tag records are retained.
-        expect(
-            await tags.countBy({
-                name: In([oldTag, keptTag]),
-            }),
-        ).toBe(2);
-
-        // 16. The unrelated article is unaffected.
-        expect(
-            await articles.existsBy({
-                id: siblingArticle.id,
-            }),
-        ).toBe(true);
-
-        expect(
-            await articleTags.countBy({
-                articleId: siblingArticle.id,
-            }),
-        ).toBe(1);
-
-        expect(
-            await favorites.countBy({
-                articleId: siblingArticle.id,
-            }),
-        ).toBe(1);
+        await favorites.insert([
+            { userId: other.id, articleId: article.id },
+            { userId: owner.id, articleId: sibling.id },
+        ]);
+        const sharedTagRow = await tags.findOneByOrFail({ name: sharedTag });
+        expect(await links.countBy({ tagId: sharedTagRow.id })).toBe(2);
 
         await request(server)
-            .get(`/api/articles/${siblingArticle.slug}`)
+            .delete(url)
+            .set('Authorization', owner.authorization)
+            .expect(204);
+
+        expect(await db.getRepository(User).countBy({
+            id: In([owner.id, other.id]),
+        })).toBe(2);
+        expect(await tags.countBy({
+            name: In([oldTag, sharedTag]),
+        })).toBe(2);
+        expect(await db.getRepository(Article).existsBy({
+            id: sibling.id,
+        })).toBe(true);
+        expect(await links.countBy({ articleId: sibling.id })).toBe(1);
+        expect(await links.countBy({ tagId: sharedTagRow.id })).toBe(1);
+        expect(await favorites.countBy({
+            userId: owner.id, articleId: sibling.id,
+        })).toBe(1);
+        expect(await favorites.countBy({ articleId: article.id })).toBe(0);
+        const detail = await request(server)
+            .get(`/api/articles/${sibling.slug}`)
             .expect(200);
-
-    }, 40000);
-
+        expect(detail.body.article.tagList).toEqual([sharedTag]);
+        expect(detail.body.article.favoritesCount).toBe(1);
+    }, 30000);
 });

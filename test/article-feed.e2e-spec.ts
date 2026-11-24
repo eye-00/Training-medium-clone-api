@@ -5,7 +5,7 @@ import {
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
-import { DataSource } from 'typeorm';
+import { DataSource, In } from 'typeorm';
 import {
     afterAll,
     beforeAll,
@@ -23,25 +23,10 @@ describe('Article Feed E2E', () => {
     let app: INestApplication | undefined;
     let databaseVerified = false;
 
-    const createdUsers: Array<{
-        id: string;
-        email: string;
-    }> = [];
-
-
-    const suffix = randomUUID()
-        .replaceAll('-', '')
-        .slice(0, 16);
-
+    const createdUsers: Array<{ id: string; email: string }> = [];
+    const createdTags = new Set<string>();
+    const suiteSuffix = randomUUID().replaceAll('-', '').slice(0, 8);
     const password = 'ExamplePass123!';
-
-    const viewerUsername = `feed_viewer_${suffix}`;
-    const aliceUsername = `feed_alice_${suffix}`;
-    const bobUsername = `feed_bob_${suffix}`;
-    const outsiderUsername = `feed_outside_${suffix}`;
-
-    const scopeTag = `feed_${suffix}`;
-
 
     beforeAll(async () => {
         const env = process.env;
@@ -58,17 +43,13 @@ describe('Article Feed E2E', () => {
             throw new Error('Unsafe E2E environment');
         }
 
-        const { AppModule } = await import(
-            '../src/app.module.js'
-        );
-
+        const { AppModule } = await import('../src/app.module.js');
         const moduleRef = await Test.createTestingModule({
             imports: [AppModule],
         }).compile();
 
         app = moduleRef.createNestApplication();
         app.setGlobalPrefix('api');
-
         app.useGlobalPipes(
             new ValidationPipe({
                 whitelist: true,
@@ -80,11 +61,11 @@ describe('Article Feed E2E', () => {
         await app.listen(0, '127.0.0.1');
 
         const rows = (await app.get(DataSource).query(`
-      SELECT
-        DATABASE() AS db,
-        CURRENT_USER() AS dbUser,
-        @@server_uuid AS serverUuid
-    `)) as Array<{
+            SELECT
+                DATABASE() AS db,
+                CURRENT_USER() AS dbUser,
+                @@server_uuid AS serverUuid
+        `)) as Array<{
             db: string;
             dbUser: string;
             serverUuid: string;
@@ -97,9 +78,7 @@ describe('Article Feed E2E', () => {
             !identity.dbUser.startsWith('medium_test_user@') ||
             identity.serverUuid !== env.DB_TEST_SERVER_UUID
         ) {
-            throw new Error(
-                'E2E database identity verification failed',
-            );
+            throw new Error('E2E database identity verification failed');
         }
 
         databaseVerified = true;
@@ -112,8 +91,8 @@ describe('Article Feed E2E', () => {
             if (databaseVerified) {
                 const db = app.get(DataSource);
 
-                // Only remove users created by this test.
-                // FK cascades remove their articles and links.
+                // Only remove users registered by this suite.
+                // Their article records and relationships cascade.
                 for (const user of createdUsers) {
                     await db.getRepository(User).delete({
                         id: user.id,
@@ -121,409 +100,262 @@ describe('Article Feed E2E', () => {
                     });
                 }
 
-
+                // Only remove uniquely generated tags from this suite.
+                if (createdTags.size > 0) {
+                    await db.getRepository(Tag).delete({
+                        name: In([...createdTags]),
+                    });
+                }
             }
         } finally {
             await app.close();
         }
     }, 20000);
 
-
-
-
-    it('validates authenticated feed, pagination and follow changes', async () => {
+    function context() {
         if (!app || !databaseVerified) {
             throw new Error('Test app is not ready');
         }
+        return {
+            server: app.getHttpServer(),
+            db: app.get(DataSource),
+        };
+    }
 
-        const server = app.getHttpServer();
-        const db = app.get(DataSource);
+    function makeTag(prefix: string): string {
+        const value = `${prefix}_${suiteSuffix}_${randomUUID().replaceAll('-', '').slice(0, 10)}`;
+        createdTags.add(value);
+        return value;
+    }
+
+    async function registerUser() {
+        const { server } = context();
+        const identity = `${suiteSuffix}_${randomUUID().replaceAll('-', '').slice(0, 10)}`;
+        const username = `feed_${identity}`;
+        const email = `${username}@example.com`;
+        const registration = await request(server)
+            .post('/api/users')
+            .send({ email, username, password })
+            .expect(201);
+
+        const id = registration.body.user.id as string;
+        createdUsers.push({ id, email });
+
+        const login = await request(server)
+            .post('/api/users/login')
+            .send({ email, password })
+            .expect(200);
+
+        return {
+            id,
+            username,
+            authorization: `Bearer ${login.body.accessToken as string}`,
+        };
+    }
+
+    const feedUrl = '/api/articles/feed';
+
+    type TestUser = Awaited<ReturnType<typeof registerUser>>;
+
+    async function createArticle(
+        author: TestUser,
+        title: string,
+        scopeTag: string,
+        createdAt: string,
+    ) {
+        const { server, db } = context();
+        const response = await request(server)
+            .post('/api/articles')
+            .set('Authorization', author.authorization)
+            .send({ article: {
+                title,
+                description: `Description of ${title}`,
+                body: `Body of ${title}`,
+                tagList: [scopeTag],
+            } })
+            .expect(201);
 
         const articles = db.getRepository(Article);
-        const favorites = db.getRepository(ArticleFavorite);
+        const article = await articles.findOneByOrFail({
+            slug: response.body.article.slug as string,
+        });
+        await articles.update({ id: article.id }, {
+            createdAt: new Date(createdAt),
+        });
+        return article;
+    }
 
-        const feedUrl = '/api/articles/feed';
+    async function follow(viewer: TestUser, author: TestUser) {
+        const { server } = context();
+        await request(server)
+            .post(`/api/profiles/${author.username}/follow`)
+            .set('Authorization', viewer.authorization)
+            .expect(200);
+    }
 
-        // 1. Register and authenticate a user.
-        async function registerUser(username: string) {
-            const email = `${username}@example.com`;
+    async function unfollow(viewer: TestUser, author: TestUser) {
+        const { server } = context();
+        await request(server)
+            .delete(`/api/profiles/${author.username}/follow`)
+            .set('Authorization', viewer.authorization)
+            .expect(204);
+    }
 
-            const registration = await request(server)
-                .post('/api/users')
-                .send({ email, username, password })
-                .expect(201);
+    async function getFeed(viewer: TestUser, query: { limit?: number; offset?: number } = {}) {
+        const { server } = context();
+        return request(server)
+            .get(feedUrl)
+            .set('Authorization', viewer.authorization)
+            .query(query)
+            .expect(200);
+    }
 
-            const id = registration.body.user.id as string;
+    function slugs(items: Array<{ slug: string }>): string[] {
+        return items.map((item) => item.slug);
+    }
 
-            createdUsers.push({ id, email });
+    // Every call creates a separate set of users, articles and tags.
+    // No test depends on a relationship or article from another test.
+    async function fixture() {
+        const { db } = context();
+        const viewer = await registerUser();
+        const alice = await registerUser();
+        const bob = await registerUser();
+        const outsider = await registerUser();
+        const scopeTag = makeTag('feed');
+        const aliceA1 = await createArticle(alice, 'Alice Article 1', scopeTag, '2025-01-01T00:00:00.000Z');
+        const aliceA2 = await createArticle(alice, 'Alice Article 2', scopeTag, '2025-01-04T00:00:00.000Z');
+        const bobB1 = await createArticle(bob, 'Bob Article 1', scopeTag, '2025-01-03T00:00:00.000Z');
+        const outsiderX1 = await createArticle(outsider, 'Outsider Article', scopeTag, '2025-01-05T00:00:00.000Z');
+        const viewerSelf = await createArticle(viewer, 'Viewer Own Article', scopeTag, '2025-01-06T00:00:00.000Z');
 
-            const login = await request(server)
-                .post('/api/users/login')
-                .send({ email, password })
-                .expect(200);
-
-            return {
-                id,
-                username,
-                authorization:
-                    `Bearer ${login.body.accessToken as string}`,
-            };
-        }
-
-        // 2. Four independent users.
-        const viewer = await registerUser(viewerUsername);
-        const alice = await registerUser(aliceUsername);
-        const bob = await registerUser(bobUsername);
-        const outsider = await registerUser(outsiderUsername);
-
-        // 3. Helper: create an article with a fixed timestamp.
-        async function createArticle(
-            authorization: string,
-            title: string,
-            createdAt: string,
-        ) {
-            const response = await request(server)
-                .post('/api/articles')
-                .set('Authorization', authorization)
-                .send({
-                    article: {
-                        title,
-                        description: `Description of ${title}`,
-                        body: `Body of ${title}`,
-                        tagList: [scopeTag],
-                    },
-                })
-                .expect(201);
-
-            const article = await articles.findOneByOrFail({
-                slug: response.body.article.slug as string,
-            });
-
-            // Deterministic ordering, independent of test speed.
-            await articles.update(
-                { id: article.id },
-                { createdAt: new Date(createdAt) },
-            );
-
-            return article;
-        }
-
-        // 4. Create five articles.
-        const aliceA1 = await createArticle(
-            alice.authorization,
-            'Alice Article 1',
-            '2025-01-01T00:00:00.000Z',
-        );
-
-        const aliceA2 = await createArticle(
-            alice.authorization,
-            'Alice Article 2',
-            '2025-01-04T00:00:00.000Z',
-        );
-
-        const bobB1 = await createArticle(
-            bob.authorization,
-            'Bob Article 1',
-            '2025-01-03T00:00:00.000Z',
-        );
-
-        const outsiderX1 = await createArticle(
-            outsider.authorization,
-            'Outsider Article',
-            '2025-01-05T00:00:00.000Z',
-        );
-
-        const viewerSelf = await createArticle(
-            viewer.authorization,
-            'Viewer Own Article',
-            '2025-01-06T00:00:00.000Z',
-        );
-
-        // 5. Seed favorites to verify personalized state.
-        await favorites.insert([
-            {
-                userId: viewer.id,
-                articleId: aliceA1.id,
-            },
-            {
-                userId: outsider.id,
-                articleId: aliceA2.id,
-            },
+        await db.getRepository(ArticleFavorite).insert([
+            { userId: viewer.id, articleId: aliceA1.id },
+            { userId: outsider.id, articleId: aliceA2.id },
         ]);
 
-        function slugs(
-            items: Array<{ slug: string }>,
-        ): string[] {
-            return items.map((item) => item.slug);
-        }
+        return { viewer, alice, bob, outsider, scopeTag, aliceA1, aliceA2, bobB1, outsiderX1, viewerSelf };
+    }
 
-        // 6. JWT is required.
-        await request(server)
-            .get(feedUrl)
-            .expect(401);
+    async function followedFixture() {
+        const f = await fixture();
+        await follow(f.viewer, f.alice);
+        await follow(f.viewer, f.bob);
+        return f;
+    }
 
-        await request(server)
-            .get(feedUrl)
+    it('requires a valid JWT to access the feed', async () => {
+        const { server } = context();
+        await request(server).get(feedUrl).expect(401);
+        await request(server).get(feedUrl)
             .set('Authorization', 'Bearer invalid.token')
             .expect(401);
+    });
 
-        // 7. Invalid pagination and unsupported parameters.
-        const invalidQueries = [
-            'limit=0',
-            'limit=101',
-            'limit=-1',
-            'limit=1.5',
-            'limit=abc',
-            'offset=-1',
-            'offset=100001',
-            'offset=1.5',
-            'offset=abc',
-            'tag=nestjs',
-            'author=alice',
-            'favorited=bob',
-            'unknown=value',
-        ];
+    it.each([
+        'limit=0', 'limit=101', 'limit=-1', 'limit=1.5', 'limit=abc',
+        'offset=-1', 'offset=100001', 'offset=1.5', 'offset=abc',
+        'tag=nestjs', 'author=alice', 'favorited=bob', 'unknown=value',
+    ])('rejects invalid feed query: %s', async (query) => {
+        const { server } = context();
+        const viewer = await registerUser();
+        await request(server).get(`${feedUrl}?${query}`)
+            .set('Authorization', viewer.authorization)
+            .expect(400);
+    }, 40000);
 
-        for (const query of invalidQueries) {
-            await request(server)
-                .get(`${feedUrl}?${query}`)
-                .set('Authorization', viewer.authorization)
-                .expect(400);
+    it('returns an empty feed when the viewer follows nobody', async () => {
+        const f = await fixture();
+        const result = await getFeed(f.viewer);
+        expect(result.body).toMatchObject({ articles: [], articlesCount: 0 });
+    }, 40000);
+
+    it('returns articles from one followed author in newest-first order', async () => {
+        const f = await fixture();
+        await follow(f.viewer, f.alice);
+        const result = await getFeed(f.viewer);
+        expect(result.body.articlesCount).toBe(2);
+        expect(slugs(result.body.articles)).toEqual([f.aliceA2.slug, f.aliceA1.slug]);
+        for (const article of result.body.articles) {
+            expect(article.author).toMatchObject({ username: f.alice.username, following: true });
         }
+    }, 40000);
 
-        // 8. Initially, viewer follows nobody.
-        const initialFeed = await request(server)
-            .get(feedUrl)
-            .set('Authorization', viewer.authorization)
-            .expect(200);
+    it('combines followed authors in newest-first order and excludes unrelated and own articles', async () => {
+        const f = await followedFixture();
+        const result = await getFeed(f.viewer);
+        const actual = slugs(result.body.articles);
+        expect(result.body.articlesCount).toBe(3);
+        expect(actual).toEqual([f.aliceA2.slug, f.bobB1.slug, f.aliceA1.slug]);
+        expect(actual).not.toContain(f.outsiderX1.slug);
+        expect(actual).not.toContain(f.viewerSelf.slug);
+    }, 40000);
 
-        expect(initialFeed.body).toMatchObject({
-            articles: [],
-            articlesCount: 0,
-        });
-
-        // 9. Viewer follows Alice through the actual API.
-        const followAliceUrl =
-            `/api/profiles/${alice.username}/follow`;
-
-        const followBobUrl =
-            `/api/profiles/${bob.username}/follow`;
-
-        const followOutsiderUrl =
-            `/api/profiles/${outsider.username}/follow`;
-
-        await request(server)
-            .post(followAliceUrl)
-            .set('Authorization', viewer.authorization)
-            .expect(200);
-
-        const aliceFeed = await request(server)
-            .get(feedUrl)
-            .set('Authorization', viewer.authorization)
-            .expect(200);
-
-        expect(aliceFeed.body.articlesCount).toBe(2);
-
-        expect(slugs(aliceFeed.body.articles)).toEqual([
-            aliceA2.slug,
-            aliceA1.slug,
+    it('maps viewer-specific favorites, following and tags without exposing private fields', async () => {
+        const f = await followedFixture();
+        const result = await getFeed(f.viewer);
+        expect(result.body.articlesCount).toBe(3);
+        expect(result.body.articles).toMatchObject([
+            { slug: f.aliceA2.slug, favorited: false, favoritesCount: 1, author: { username: f.alice.username, following: true } },
+            { slug: f.bobB1.slug, favorited: false, favoritesCount: 0, author: { username: f.bob.username, following: true } },
+            { slug: f.aliceA1.slug, favorited: true, favoritesCount: 1, author: { username: f.alice.username, following: true } },
         ]);
-
-        for (const article of aliceFeed.body.articles) {
-            expect(article.author.username)
-                .toBe(alice.username);
-
-            expect(article.author.following).toBe(true);
-        }
-
-        // 10. Viewer follows Bob as well.
-        await request(server)
-            .post(followBobUrl)
-            .set('Authorization', viewer.authorization)
-            .expect(200);
-
-        const combinedFeed = await request(server)
-            .get(feedUrl)
-            .set('Authorization', viewer.authorization)
-            .expect(200);
-
-        expect(combinedFeed.body.articlesCount).toBe(3);
-
-        expect(slugs(combinedFeed.body.articles)).toEqual([
-            aliceA2.slug,
-            bobB1.slug,
-            aliceA1.slug,
-        ]);
-
-        // Articles from outsider and viewer are excluded.
-        expect(slugs(combinedFeed.body.articles))
-            .not.toContain(outsiderX1.slug);
-
-        expect(slugs(combinedFeed.body.articles))
-            .not.toContain(viewerSelf.slug);
-
-        // 11. Response fields and personalized state.
-        expect(combinedFeed.body.articles).toMatchObject([
-            {
-                slug: aliceA2.slug,
-                favorited: false,
-                favoritesCount: 1,
-                author: {
-                    username: alice.username,
-                    following: true,
-                },
-            },
-            {
-                slug: bobB1.slug,
-                favorited: false,
-                favoritesCount: 0,
-                author: {
-                    username: bob.username,
-                    following: true,
-                },
-            },
-            {
-                slug: aliceA1.slug,
-                favorited: true,
-                favoritesCount: 1,
-                author: {
-                    username: alice.username,
-                    following: true,
-                },
-            },
-        ]);
-
-        for (const article of combinedFeed.body.articles) {
+        for (const article of result.body.articles) {
             expect(article).not.toHaveProperty('body');
             expect(article).not.toHaveProperty('authorId');
-
-            expect(article.author)
-                .not.toHaveProperty('email');
-
-            expect(article.author)
-                .not.toHaveProperty('passwordHash');
-
-            expect(article.tagList).toEqual([scopeTag]);
-
+            expect(article.author).not.toHaveProperty('email');
+            expect(article.author).not.toHaveProperty('passwordHash');
+            expect(article.tagList).toEqual([f.scopeTag]);
             expect(typeof article.createdAt).toBe('string');
             expect(typeof article.updatedAt).toBe('string');
         }
-
-        // 12. Pagination: first page.
-        const firstPage = await request(server)
-            .get(feedUrl)
-            .set('Authorization', viewer.authorization)
-            .query({ limit: 2, offset: 0 })
-            .expect(200);
-
-        expect(firstPage.body.articlesCount).toBe(3);
-
-        expect(slugs(firstPage.body.articles)).toEqual([
-            aliceA2.slug,
-            bobB1.slug,
-        ]);
-
-        // 13. Pagination: second page.
-        const secondPage = await request(server)
-            .get(feedUrl)
-            .set('Authorization', viewer.authorization)
-            .query({ limit: 2, offset: 2 })
-            .expect(200);
-
-        expect(secondPage.body.articlesCount).toBe(3);
-
-        expect(slugs(secondPage.body.articles)).toEqual([
-            aliceA1.slug,
-        ]);
-
-        // 14. Offset beyond total matches.
-        const beyondLastPage = await request(server)
-            .get(feedUrl)
-            .set('Authorization', viewer.authorization)
-            .query({ limit: 2, offset: 10 })
-            .expect(200);
-
-        expect(beyondLastPage.body).toMatchObject({
-            articles: [],
-            articlesCount: 3,
-        });
-
-        // 15. Article Detail matches Feed viewer state.
-        const detail = await request(server)
-            .get(`/api/articles/${aliceA1.slug}`)
-            .set('Authorization', viewer.authorization)
-            .expect(200);
-
-        expect(detail.body.article).toMatchObject({
-            slug: aliceA1.slug,
-            favorited: true,
-            favoritesCount: 1,
-            author: {
-                username: alice.username,
-                following: true,
-            },
-        });
-
-        // 16. Unfollow Alice.
-        await request(server)
-            .delete(followAliceUrl)
-            .set('Authorization', viewer.authorization)
-            .expect(204);
-
-        const afterUnfollowAlice = await request(server)
-            .get(feedUrl)
-            .set('Authorization', viewer.authorization)
-            .expect(200);
-
-        expect(afterUnfollowAlice.body.articlesCount).toBe(1);
-
-        expect(
-            slugs(afterUnfollowAlice.body.articles),
-        ).toEqual([bobB1.slug]);
-
-        // 17. Unfollow Bob.
-        await request(server)
-            .delete(followBobUrl)
-            .set('Authorization', viewer.authorization)
-            .expect(204);
-
-        const emptyAgain = await request(server)
-            .get(feedUrl)
-            .set('Authorization', viewer.authorization)
-            .expect(200);
-
-        expect(emptyAgain.body).toMatchObject({
-            articles: [],
-            articlesCount: 0,
-        });
-
-        // 18. Follow Outsider: feed updates accordingly.
-        await request(server)
-            .post(followOutsiderUrl)
-            .set('Authorization', viewer.authorization)
-            .expect(200);
-
-        const outsiderFeed = await request(server)
-            .get(feedUrl)
-            .set('Authorization', viewer.authorization)
-            .expect(200);
-
-        expect(outsiderFeed.body.articlesCount).toBe(1);
-
-        expect(slugs(outsiderFeed.body.articles))
-            .toEqual([outsiderX1.slug]);
-
-        expect(
-            outsiderFeed.body.articles[0].author.following,
-        ).toBe(true);
-
-        // 19. Clean up the final relationship via API.
-        await request(server)
-            .delete(followOutsiderUrl)
-            .set('Authorization', viewer.authorization)
-            .expect(204);
-
     }, 40000);
 
+    it.each([0, 2, 10])('paginates the feed with limit 2 and offset %i while retaining total count', async (offset) => {
+        const f = await followedFixture();
+        const result = await getFeed(f.viewer, { limit: 2, offset });
+        const expected = [f.aliceA2.slug, f.bobB1.slug, f.aliceA1.slug].slice(offset, offset + 2);
+        expect(result.body.articlesCount).toBe(3);
+        expect(slugs(result.body.articles)).toEqual(expected);
+    }, 40000);
 
+    it('keeps article detail consistent with feed viewer state', async () => {
+        const f = await followedFixture();
+        const { server } = context();
+        const feed = await getFeed(f.viewer);
+        const item = feed.body.articles.find((a: { slug: string }) => a.slug === f.aliceA1.slug);
+        const detail = await request(server).get(`/api/articles/${f.aliceA1.slug}`)
+            .set('Authorization', f.viewer.authorization).expect(200);
+        const expected = { slug: f.aliceA1.slug, favorited: true, favoritesCount: 1, author: { username: f.alice.username, following: true } };
+        expect(item).toMatchObject(expected);
+        expect(detail.body.article).toMatchObject(expected);
+    }, 40000);
+
+    it('removes only the unfollowed author articles from the feed', async () => {
+        const f = await followedFixture();
+        expect((await getFeed(f.viewer)).body.articlesCount).toBe(3);
+        await unfollow(f.viewer, f.alice);
+        const result = await getFeed(f.viewer);
+        expect(result.body.articlesCount).toBe(1);
+        expect(slugs(result.body.articles)).toEqual([f.bobB1.slug]);
+    }, 40000);
+
+    it('returns an empty feed after unfollowing all authors', async () => {
+        const f = await followedFixture();
+        await unfollow(f.viewer, f.alice);
+        await unfollow(f.viewer, f.bob);
+        expect((await getFeed(f.viewer)).body).toMatchObject({ articles: [], articlesCount: 0 });
+    }, 40000);
+
+    it('updates the feed when following and unfollowing a previously unrelated author', async () => {
+        const f = await fixture();
+        expect((await getFeed(f.viewer)).body).toMatchObject({ articles: [], articlesCount: 0 });
+        await follow(f.viewer, f.outsider);
+        const result = await getFeed(f.viewer);
+        expect(result.body.articlesCount).toBe(1);
+        expect(slugs(result.body.articles)).toEqual([f.outsiderX1.slug]);
+        expect(result.body.articles[0].author.following).toBe(true);
+        await unfollow(f.viewer, f.outsider);
+        expect((await getFeed(f.viewer)).body).toMatchObject({ articles: [], articlesCount: 0 });
+    }, 40000);
 });

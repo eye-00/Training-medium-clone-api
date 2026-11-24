@@ -1,4 +1,3 @@
-
 import {
     type INestApplication,
     ValidationPipe,
@@ -23,15 +22,11 @@ import { ArticleTag } from '../src/articles/entities/article-tag.entity.js';
 describe('Article Create E2E', () => {
     let app: INestApplication | undefined;
     let databaseVerified = false;
-    let createdUserId: string | undefined;
 
-    const suffix = randomUUID().replaceAll('-', '').slice(0, 16);
-    const email = `e2e-article-${suffix}@example.com`;
-    const username = `article_${suffix}`;
+    const createdUsers: Array<{ id: string; email: string }> = [];
+    const createdTags = new Set<string>();
+    const suiteSuffix = randomUUID().replaceAll('-', '').slice(0, 8);
     const password = 'ExamplePass123!';
-
-    const tagA = `backend_${suffix}`;
-    const tagB = `nestjs_${suffix}`;
 
     beforeAll(async () => {
         const env = process.env;
@@ -48,17 +43,13 @@ describe('Article Create E2E', () => {
             throw new Error('Unsafe E2E environment');
         }
 
-        const { AppModule } = await import(
-            '../src/app.module.js'
-        );
-
+        const { AppModule } = await import('../src/app.module.js');
         const moduleRef = await Test.createTestingModule({
             imports: [AppModule],
         }).compile();
 
         app = moduleRef.createNestApplication();
         app.setGlobalPrefix('api');
-
         app.useGlobalPipes(
             new ValidationPipe({
                 whitelist: true,
@@ -70,11 +61,11 @@ describe('Article Create E2E', () => {
         await app.init();
 
         const rows = (await app.get(DataSource).query(`
-      SELECT
-        DATABASE() AS db,
-        CURRENT_USER() AS dbUser,
-        @@server_uuid AS serverUuid
-    `)) as Array<{
+            SELECT
+                DATABASE() AS db,
+                CURRENT_USER() AS dbUser,
+                @@server_uuid AS serverUuid
+        `)) as Array<{
             db: string;
             dbUser: string;
             serverUuid: string;
@@ -87,9 +78,7 @@ describe('Article Create E2E', () => {
             !identity.dbUser.startsWith('medium_test_user@') ||
             identity.serverUuid !== env.DB_TEST_SERVER_UUID
         ) {
-            throw new Error(
-                'E2E database identity verification failed',
-            );
+            throw new Error('E2E database identity verification failed');
         }
 
         databaseVerified = true;
@@ -99,69 +88,99 @@ describe('Article Create E2E', () => {
         if (!app) return;
 
         try {
-            if (databaseVerified && createdUserId) {
+            if (databaseVerified) {
                 const db = app.get(DataSource);
 
-                // Deleting this test user cascades to its articles,
-                // article_tags and article_favorites.
-                await db.getRepository(User).delete({
-                    id: createdUserId,
-                    email,
-                });
+                // Only remove users registered by this suite.
+                // Their article records and relationships cascade.
+                for (const user of createdUsers) {
+                    await db.getRepository(User).delete({
+                        id: user.id,
+                        email: user.email,
+                    });
+                }
 
-                // Only remove tags uniquely named for this test.
-                await db.getRepository(Tag).delete({
-                    name: In([tagA, tagB]),
-                });
+                // Only remove uniquely generated tags from this suite.
+                if (createdTags.size > 0) {
+                    await db.getRepository(Tag).delete({
+                        name: In([...createdTags]),
+                    });
+                }
             }
         } finally {
             await app.close();
         }
     }, 20000);
 
-    it('validates authentication, article creation and persistence', async () => {
+    function context() {
         if (!app || !databaseVerified) {
             throw new Error('Test app is not ready');
         }
+        return {
+            server: app.getHttpServer(),
+            db: app.get(DataSource),
+        };
+    }
 
-        const server = app.getHttpServer();
-        const db = app.get(DataSource);
+    function makeTag(prefix: string): string {
+        const value = `${prefix}_${suiteSuffix}_${randomUUID().replaceAll('-', '').slice(0, 10)}`;
+        createdTags.add(value);
+        return value;
+    }
 
-        const articles = db.getRepository(Article);
-        const tags = db.getRepository(Tag);
-        const articleTags = db.getRepository(ArticleTag);
+    function makePayload(tagList: string[]) {
+        return {
+            article: {
+                title: 'Getting Started with NestJS',
+                description: 'A beginner guide',
+                body: 'Learning how NestJS and TypeORM work.',
+                tagList,
+            },
+        };
+    }
 
-        // 1. Register a dedicated author.
-        const registration = await request(server)
+    async function registerAuthor() {
+        const { server } = context();
+        const identity = `${suiteSuffix}_${randomUUID().replaceAll('-', '').slice(0, 6)}`;
+        const email = `e2e-article-${identity}@example.com`;
+        const username = `article_${identity}`;
+
+        const registered = await request(server)
             .post('/api/users')
             .send({ email, username, password })
             .expect(201);
 
-        const userId = registration.body.user.id as string;
-        createdUserId = userId;
+        const userId = registered.body.user.id as string;
+        createdUsers.push({ id: userId, email });
 
         const login = await request(server)
             .post('/api/users/login')
             .send({ email, password })
             .expect(200);
 
-        const authorization =
-            `Bearer ${login.body.accessToken as string}`;
-
-        const payload = {
-            article: {
-                title: 'Getting Started with NestJS',
-                description: 'A beginner guide',
-                body: 'Learning how NestJS and TypeORM work.',
-                tagList: [
-                    ` ${tagB.toUpperCase()} `,
-                    tagB,
-                    ` ${tagA.toUpperCase()} `,
-                ],
-            },
+        return {
+            userId,
+            username,
+            authorization: `Bearer ${login.body.accessToken as string}`,
         };
+    }
 
-        // 2. Missing and invalid JWT.
+    async function createArticle(
+        authorization: string,
+        payload: ReturnType<typeof makePayload>,
+    ) {
+        const { server } = context();
+        return request(server)
+            .post('/api/articles')
+            .set('Authorization', authorization)
+            .send(payload)
+            .expect(201);
+    }
+
+    it('requires authentication to create an article', async () => {
+        const { server } = context();
+        const payload = makePayload([]);
+
         await request(server)
             .post('/api/articles')
             .send(payload)
@@ -172,172 +191,181 @@ describe('Article Create E2E', () => {
             .set('Authorization', 'Bearer invalid.token')
             .send(payload)
             .expect(401);
+    });
 
-        // 3. DTO validation.
+    it('rejects malformed create input without persisting an article', async () => {
+        const { server, db } = context();
+        const author = await registerAuthor();
+        const payload = makePayload([]);
+
         await request(server)
             .post('/api/articles')
-            .set('Authorization', authorization)
+            .set('Authorization', author.authorization)
             .send({})
             .expect(400);
 
         await request(server)
             .post('/api/articles')
-            .set('Authorization', authorization)
-            .send({
-                article: {
-                    ...payload.article,
-                    title: '   ',
-                },
-            })
+            .set('Authorization', author.authorization)
+            .send({ article: { ...payload.article, title: '   ' } })
             .expect(400);
 
         await request(server)
             .post('/api/articles')
-            .set('Authorization', authorization)
-            .send({
-                article: {
-                    ...payload.article,
-                    authorId: randomUUID(),
-                },
-            })
+            .set('Authorization', author.authorization)
+            .send({ article: { ...payload.article, authorId: randomUUID() } })
             .expect(400);
 
-        expect(await articles.countBy({
-            authorId: userId,
+        expect(await db.getRepository(Article).countBy({
+            authorId: author.userId,
         })).toBe(0);
+    });
 
-        // 4. Create a valid article.
-        const created = await request(server)
-            .post('/api/articles')
-            .set('Authorization', authorization)
-            .send(payload)
-            .expect(201);
+    it('persists a created article and normalized tag relationships', async () => {
+        const { server, db } = context();
+        const author = await registerAuthor();
+        const tagA = makeTag('backend');
+        const tagB = makeTag('nestjs');
+        const payload = makePayload([
+            ` ${tagB.toUpperCase()} `,
+            tagB,
+            ` ${tagA.toUpperCase()} `,
+        ]);
 
+        const created = await createArticle(author.authorization, payload);
         const article = created.body.article as {
             slug: string;
             title: string;
-            description: string;
-            body: string;
             tagList: string[];
             createdAt: string;
             updatedAt: string;
             favorited: boolean;
             favoritesCount: number;
-            author: {
-                username: string;
-                following: boolean;
-            };
+            author: { username: string; following: boolean };
         };
 
         expect(article.slug).toMatch(
             /^getting-started-with-nestjs-[0-9a-f-]{36}$/,
         );
-
-        expect(article.title).toBe(
-            payload.article.title,
-        );
-
-        expect(article.tagList).toEqual([
-            tagA,
-            tagB,
-        ]);
-
+        expect(article.title).toBe(payload.article.title);
+        expect(article.tagList).toEqual([tagA, tagB].sort());
         expect(article.favorited).toBe(false);
         expect(article.favoritesCount).toBe(0);
-
         expect(article.author).toMatchObject({
-            username,
+            username: author.username,
             following: false,
         });
+        expect(Number.isNaN(Date.parse(article.createdAt))).toBe(false);
+        expect(Number.isNaN(Date.parse(article.updatedAt))).toBe(false);
 
-        expect(Number.isNaN(
-            Date.parse(article.createdAt),
-        )).toBe(false);
-
-        // 5. Verify database records and relationships.
-        const saved = await articles.findOneByOrFail({
+        const saved = await db.getRepository(Article).findOneByOrFail({
             slug: article.slug,
         });
-
-        expect(saved.authorId).toBe(userId);
+        expect(saved.authorId).toBe(author.userId);
         expect(saved.body).toBe(payload.article.body);
 
-        const links = await articleTags.findBy({
+        const links = await db.getRepository(ArticleTag).findBy({
             articleId: saved.id,
         });
-
         expect(links).toHaveLength(2);
 
-        const storedTags = await tags.findBy({
+        const storedTags = await db.getRepository(Tag).findBy({
             id: In(links.map((link) => link.tagId)),
         });
-
         expect(storedTags.map((tag) => tag.name).sort())
-            .toEqual([tagA, tagB]);
+            .toEqual([tagA, tagB].sort());
 
-
-
-        // 7. Anonymous users can read an article.
-        const publicRead = await request(server)
+        const detail = await request(server)
             .get(`/api/articles/${article.slug}`)
+            .expect(200);
+        expect(created.body.article.tagList)
+            .toEqual(detail.body.article.tagList);
+    });
+
+    it('allows anonymous and authenticated article reads', async () => {
+        const { server } = context();
+        const author = await registerAuthor();
+        const tagA = makeTag('backend');
+        const tagB = makeTag('nestjs');
+        const payload = makePayload([tagA, tagB]);
+
+        const created = await createArticle(author.authorization, payload);
+        const slug = created.body.article.slug as string;
+
+        const publicRead = await request(server)
+            .get(`/api/articles/${slug}`)
             .expect(200);
 
         expect(publicRead.body.article).toMatchObject({
-            slug: article.slug,
+            slug,
             title: payload.article.title,
             description: payload.article.description,
             body: payload.article.body,
-            tagList: [tagA, tagB],
+            tagList: [tagA, tagB].sort(),
             favoritesCount: 0,
             favorited: false,
             author: {
-                username,
+                username: author.username,
                 following: false,
             },
         });
 
-        // 8. Authenticated users can also read.
         const authenticatedRead = await request(server)
-            .get(`/api/articles/${article.slug}`)
-            .set('Authorization', authorization)
+            .get(`/api/articles/${slug}`)
+            .set('Authorization', author.authorization)
             .expect(200);
 
-        expect(authenticatedRead.body.article.slug)
-            .toBe(article.slug);
+        expect(authenticatedRead.body.article.slug).toBe(slug);
+        expect(authenticatedRead.body.article.favorited).toBe(false);
+    });
 
-        expect(authenticatedRead.body.article.favorited)
-            .toBe(false);
+    it('rejects an invalid JWT on a public article endpoint', async () => {
+        const { server } = context();
+        const author = await registerAuthor();
+        const created = await createArticle(
+            author.authorization,
+            makePayload([]),
+        );
+        const slug = created.body.article.slug as string;
 
-        // 9. A supplied invalid JWT must be rejected.
         await request(server)
-            .get(`/api/articles/${article.slug}`)
+            .get(`/api/articles/${slug}`)
             .set('Authorization', 'Bearer invalid.token')
             .expect(401);
+    });
 
-        // 10. Unknown slug returns 404.
+    it('returns 404 for an unknown article slug', async () => {
+        const { server } = context();
         await request(server)
             .get(`/api/articles/nonexistent-${randomUUID()}`)
             .expect(404);
+    });
 
+    it('creates distinct slugs for identical titles and reuses tags', async () => {
+        const { db } = context();
+        const author = await registerAuthor();
+        const tagA = makeTag('backend');
+        const tagB = makeTag('nestjs');
+        const payload = makePayload([tagA, tagB]);
 
-        // 6. Same title must produce a distinct slug.
-        const second = await request(server)
-            .post('/api/articles')
-            .set('Authorization', authorization)
-            .send(payload)
-            .expect(201);
+        const first = await createArticle(author.authorization, payload);
+        const second = await createArticle(author.authorization, payload);
 
         expect(second.body.article.slug)
-            .not.toBe(article.slug);
-
-        expect(await articles.countBy({
-            authorId: userId,
+            .not.toBe(first.body.article.slug);
+        expect(await db.getRepository(Article).countBy({
+            authorId: author.userId,
         })).toBe(2);
-
-        // Both articles reuse the same tag records.
-        expect(await tags.countBy({
+        expect(await db.getRepository(Tag).countBy({
             name: In([tagA, tagB]),
         })).toBe(2);
 
-    }, 40000);
+        const articleIds = await db.getRepository(Article).find({
+            where: { authorId: author.userId },
+        });
+        const links = await db.getRepository(ArticleTag).findBy({
+            articleId: In(articleIds.map((article) => article.id)),
+        });
+        expect(links).toHaveLength(4);
+    });
 });

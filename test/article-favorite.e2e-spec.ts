@@ -5,7 +5,7 @@ import {
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
-import { DataSource } from 'typeorm';
+import { DataSource, In } from 'typeorm';
 import {
     afterAll,
     beforeAll,
@@ -23,24 +23,10 @@ describe('Article Favorite E2E', () => {
     let app: INestApplication | undefined;
     let databaseVerified = false;
 
-    const createdUsers: Array<{
-        id: string;
-        email: string;
-    }> = [];
-
-
-    const suffix = randomUUID()
-        .replaceAll('-', '')
-        .slice(0, 16);
-
+    const createdUsers: Array<{ id: string; email: string }> = [];
+    const createdTags = new Set<string>();
+    const suiteSuffix = randomUUID().replaceAll('-', '').slice(0, 8);
     const password = 'ExamplePass123!';
-
-    const aliceUsername = `fav_alice_${suffix}`;
-    const bobUsername = `fav_bob_${suffix}`;
-    const charlieUsername = `fav_charlie_${suffix}`;
-
-    const scopeTag = `favorite_${suffix}`;
-
 
     beforeAll(async () => {
         const env = process.env;
@@ -57,17 +43,13 @@ describe('Article Favorite E2E', () => {
             throw new Error('Unsafe E2E environment');
         }
 
-        const { AppModule } = await import(
-            '../src/app.module.js'
-        );
-
+        const { AppModule } = await import('../src/app.module.js');
         const moduleRef = await Test.createTestingModule({
             imports: [AppModule],
         }).compile();
 
         app = moduleRef.createNestApplication();
         app.setGlobalPrefix('api');
-
         app.useGlobalPipes(
             new ValidationPipe({
                 whitelist: true,
@@ -79,11 +61,11 @@ describe('Article Favorite E2E', () => {
         await app.listen(0, '127.0.0.1');
 
         const rows = (await app.get(DataSource).query(`
-      SELECT
-        DATABASE() AS db,
-        CURRENT_USER() AS dbUser,
-        @@server_uuid AS serverUuid
-    `)) as Array<{
+            SELECT
+                DATABASE() AS db,
+                CURRENT_USER() AS dbUser,
+                @@server_uuid AS serverUuid
+        `)) as Array<{
             db: string;
             dbUser: string;
             serverUuid: string;
@@ -96,9 +78,7 @@ describe('Article Favorite E2E', () => {
             !identity.dbUser.startsWith('medium_test_user@') ||
             identity.serverUuid !== env.DB_TEST_SERVER_UUID
         ) {
-            throw new Error(
-                'E2E database identity verification failed',
-            );
+            throw new Error('E2E database identity verification failed');
         }
 
         databaseVerified = true;
@@ -111,8 +91,8 @@ describe('Article Favorite E2E', () => {
             if (databaseVerified) {
                 const db = app.get(DataSource);
 
-                // Only remove users created by this test.
-                // FK cascades remove their articles and links.
+                // Only remove users registered by this suite.
+                // Their article records and relationships cascade.
                 for (const user of createdUsers) {
                     await db.getRepository(User).delete({
                         id: user.id,
@@ -120,65 +100,66 @@ describe('Article Favorite E2E', () => {
                     });
                 }
 
-                // Remove only this test's uniquely named tags.
-                await db.getRepository(Tag).delete({
-                    name: scopeTag,
-                });
+                // Only remove uniquely generated tags from this suite.
+                if (createdTags.size > 0) {
+                    await db.getRepository(Tag).delete({
+                        name: In([...createdTags]),
+                    });
+                }
             }
         } finally {
             await app.close();
         }
     }, 20000);
 
-
-
-    it('validates favorite, unfavorite, concurrency and persistence', async () => {
+    function context() {
         if (!app || !databaseVerified) {
             throw new Error('Test app is not ready');
         }
+        return {
+            server: app.getHttpServer(),
+            db: app.get(DataSource),
+        };
+    }
 
-        const server = app.getHttpServer();
-        const db = app.get(DataSource);
+    function makeTag(prefix: string): string {
+        const value = `${prefix}_${suiteSuffix}_${randomUUID().replaceAll('-', '').slice(0, 10)}`;
+        createdTags.add(value);
+        return value;
+    }
 
-        const articles = db.getRepository(Article);
-        const favorites = db.getRepository(ArticleFavorite);
+    async function registerUser() {
+        const { server } = context();
+        const identity = `${suiteSuffix}_${randomUUID().replaceAll('-', '').slice(0, 10)}`;
+        const username = `fav_${identity}`;
+        const email = `${username}@example.com`;
+        const registration = await request(server)
+            .post('/api/users')
+            .send({ email, username, password })
+            .expect(201);
 
-        // 1. Register and authenticate a test user.
-        async function registerUser(username: string) {
-            const email = `${username}@example.com`;
+        const id = registration.body.user.id as string;
+        createdUsers.push({ id, email });
 
-            const registration = await request(server)
-                .post('/api/users')
-                .send({
-                    email,
-                    username,
-                    password,
-                })
-                .expect(201);
+        const login = await request(server)
+            .post('/api/users/login')
+            .send({ email, password })
+            .expect(200);
 
-            const id = registration.body.user.id as string;
+        return {
+            id,
+            username,
+            authorization: `Bearer ${login.body.accessToken as string}`,
+        };
+    }
 
-            createdUsers.push({ id, email });
-
-            const login = await request(server)
-                .post('/api/users/login')
-                .send({ email, password })
-                .expect(200);
-
-            return {
-                id,
-                username,
-                authorization:
-                    `Bearer ${login.body.accessToken as string}`,
-            };
-        }
-
-        // 2. Register three independent users.
-        const alice = await registerUser(aliceUsername);
-        const bob = await registerUser(bobUsername);
-        const charlie = await registerUser(charlieUsername);
-
-        // 3. Alice creates an article.
+    // Each test builds its own users, article and uniquely named tag.
+    async function fixture(withCharlie = false) {
+        const { server, db } = context();
+        const alice = await registerUser();
+        const bob = await registerUser();
+        const charlie = withCharlie ? await registerUser() : undefined;
+        const scopeTag = makeTag('favorite');
         const created = await request(server)
             .post('/api/articles')
             .set('Authorization', alice.authorization)
@@ -191,314 +172,235 @@ describe('Article Favorite E2E', () => {
                 },
             })
             .expect(201);
-
         const slug = created.body.article.slug as string;
-
-        const article = await articles.findOneByOrFail({
-            slug,
-        });
-
+        const articles = db.getRepository(Article);
+        const favorites = db.getRepository(ArticleFavorite);
+        const article = await articles.findOneByOrFail({ slug });
         const detailUrl = `/api/articles/${slug}`;
         const favoriteUrl = `${detailUrl}/favorite`;
 
-        // Helper: verify persisted favorite count.
-        async function expectFavoriteCount(
-            expected: number,
-        ) {
-            expect(
-                await favorites.countBy({
-                    articleId: article.id,
-                }),
-            ).toBe(expected);
-        }
-
-        await expectFavoriteCount(0);
-
-        // 4. Authentication is required.
-        await request(server)
+        const favorite = (authorization: string) => request(server)
             .post(favoriteUrl)
-            .expect(401);
-
-        await request(server)
+            .set('Authorization', authorization)
+            .expect(200);
+        const unfavorite = (authorization: string) => request(server)
             .delete(favoriteUrl)
-            .expect(401);
-
-        await request(server)
-            .post(favoriteUrl)
-            .set('Authorization', 'Bearer invalid.token')
-            .expect(401);
-
-        await request(server)
-            .delete(favoriteUrl)
-            .set('Authorization', 'Bearer invalid.token')
-            .expect(401);
-
-        // 5. Unknown article.
-        const missingUrl =
-            `/api/articles/missing-${randomUUID()}/favorite`;
-
-        await request(server)
-            .post(missingUrl)
-            .set('Authorization', bob.authorization)
-            .expect(404);
-
-        await request(server)
-            .delete(missingUrl)
-            .set('Authorization', bob.authorization)
-            .expect(404);
-
-        // 6. Bob favorites the article.
-        const firstFavorite = await request(server)
-            .post(favoriteUrl)
-            .set('Authorization', bob.authorization)
+            .set('Authorization', authorization)
             .expect(200);
+        const expectCount = async (expected: number) => {
+            expect(await favorites.countBy({ articleId: article.id }))
+                .toBe(expected);
+        };
 
-        expect(firstFavorite.body.article).toMatchObject({
-            slug,
-            favorited: true,
-            favoritesCount: 1,
-        });
+        return {
+            server, articles, favorites, alice, bob, charlie,
+            scopeTag, slug, article, detailUrl, favoriteUrl,
+            favorite, unfavorite, expectCount,
+        };
+    }
 
-        expect(
-            await favorites.existsBy({
-                userId: bob.id,
-                articleId: article.id,
-            }),
-        ).toBe(true);
-
-        await expectFavoriteCount(1);
-
-        // 7. Repeated favorites must be idempotent.
-        for (let i = 0; i < 3; i++) {
-            const repeated = await request(server)
-                .post(favoriteUrl)
-                .set('Authorization', bob.authorization)
-                .expect(200);
-
-            expect(repeated.body.article).toMatchObject({
-                favorited: true,
-                favoritesCount: 1,
-            });
-        }
-
-        await expectFavoriteCount(1);
-
-        // 8. Charlie favorites the same article.
-        const secondFavorite = await request(server)
-            .post(favoriteUrl)
-            .set('Authorization', charlie.authorization)
-            .expect(200);
-
-        expect(secondFavorite.body.article).toMatchObject({
-            favorited: true,
-            favoritesCount: 2,
-        });
-
-        await expectFavoriteCount(2);
-
-        // 9. Anonymous article detail.
-        const publicDetail = await request(server)
-            .get(detailUrl)
-            .expect(200);
-
-        expect(publicDetail.body.article).toMatchObject({
-            favorited: false,
-            favoritesCount: 2,
-        });
-
-        // 10. Authenticated article detail.
-        const bobDetail = await request(server)
-            .get(detailUrl)
-            .set('Authorization', bob.authorization)
-            .expect(200);
-
-        expect(bobDetail.body.article).toMatchObject({
-            favorited: true,
-            favoritesCount: 2,
-        });
-
-        const aliceDetail = await request(server)
-            .get(detailUrl)
-            .set('Authorization', alice.authorization)
-            .expect(200);
-
-        expect(aliceDetail.body.article).toMatchObject({
-            favorited: false,
-            favoritesCount: 2,
-        });
-
-        // 11. Bob unfavorites the article.
-        const unfavorite = await request(server)
-            .delete(favoriteUrl)
-            .set('Authorization', bob.authorization)
-            .expect(200);
-
-        expect(unfavorite.body.article).toMatchObject({
-            favorited: false,
-            favoritesCount: 1,
-        });
-
-        expect(
-            await favorites.existsBy({
-                userId: bob.id,
-                articleId: article.id,
-            }),
-        ).toBe(false);
-
-        await expectFavoriteCount(1);
-
-        // 12. Repeated unfavorite is also idempotent.
-        const repeatedUnfavorite = await request(server)
-            .delete(favoriteUrl)
-            .set('Authorization', bob.authorization)
-            .expect(200);
-
-        expect(
-            repeatedUnfavorite.body.article,
-        ).toMatchObject({
-            favorited: false,
-            favoritesCount: 1,
-        });
-
-        await expectFavoriteCount(1);
-
-        // 13. Send ten concurrent favorite requests.
-        const concurrentFavorites = await Promise.all(
-            Array.from({ length: 10 }, () =>
-                request(server)
-                    .post(favoriteUrl)
-                    .set('Authorization', bob.authorization)
-                    .expect(200),
-            ),
-        );
-
-        for (const response of concurrentFavorites) {
-            expect(response.body.article).toMatchObject({
-                favorited: true,
-                favoritesCount: 2,
-            });
-        }
-
-        // Exactly one relationship for Bob.
-        expect(
-            await favorites.countBy({
-                userId: bob.id,
-                articleId: article.id,
-            }),
-        ).toBe(1);
-
-        // Bob and Charlie.
-        await expectFavoriteCount(2);
-
-        // 14. Verify listing and detail consistency.
-        const listing = await request(server)
-            .get('/api/articles')
-            .set('Authorization', bob.authorization)
-            .query({ tag: scopeTag })
-            .expect(200);
-
-        expect(listing.body.articlesCount).toBe(1);
-
-        expect(listing.body.articles).toMatchObject([
-            {
-                slug,
-                favorited: true,
-                favoritesCount: 2,
-            },
-        ]);
-
-        const favoriteFilter = await request(server)
-            .get('/api/articles')
-            .query({
-                tag: scopeTag,
-                favorited: bob.username,
-            })
-            .expect(200);
-
-        expect(favoriteFilter.body.articlesCount).toBe(1);
-        expect(favoriteFilter.body.articles[0].slug)
-            .toBe(slug);
-
-        // 15. Send ten concurrent unfavorite requests.
-        const concurrentUnfavorites = await Promise.all(
-            Array.from({ length: 10 }, () =>
-                request(server)
-                    .delete(favoriteUrl)
-                    .set('Authorization', bob.authorization)
-                    .expect(200),
-            ),
-        );
-
-        for (const response of concurrentUnfavorites) {
-            expect(response.body.article).toMatchObject({
-                favorited: false,
-                favoritesCount: 1,
-            });
-        }
-
-        expect(
-            await favorites.countBy({
-                userId: bob.id,
-                articleId: article.id,
-            }),
-        ).toBe(0);
-
-        // Charlie's favorite must remain.
-        expect(
-            await favorites.existsBy({
-                userId: charlie.id,
-                articleId: article.id,
-            }),
-        ).toBe(true);
-
-        await expectFavoriteCount(1);
-
-        // 16. Verify listing after unfavorite.
-        const emptyFavorites = await request(server)
-            .get('/api/articles')
-            .query({
-                tag: scopeTag,
-                favorited: bob.username,
-            })
-            .expect(200);
-
-        expect(emptyFavorites.body.articles).toEqual([]);
-        expect(emptyFavorites.body.articlesCount).toBe(0);
-
-        const updatedListing = await request(server)
-            .get('/api/articles')
-            .set('Authorization', bob.authorization)
-            .query({ tag: scopeTag })
-            .expect(200);
-
-        expect(updatedListing.body.articles).toMatchObject([
-            {
-                slug,
-                favorited: false,
-                favoritesCount: 1,
-            },
-        ]);
-
-        // 17. Delete the article and verify cascade.
-        await request(server)
-            .delete(detailUrl)
-            .set('Authorization', alice.authorization)
-            .expect(204);
-
-        await expectFavoriteCount(0);
-
-        expect(
-            await articles.existsBy({
-                id: article.id,
-            }),
-        ).toBe(false);
-
-        await request(server)
-            .post(favoriteUrl)
-            .set('Authorization', bob.authorization)
-            .expect(404);
-
+    it('requires a valid JWT for favorite and unfavorite', async () => {
+        const f = await fixture();
+        await request(f.server).post(f.favoriteUrl).expect(401);
+        await request(f.server).delete(f.favoriteUrl).expect(401);
+        await request(f.server).post(f.favoriteUrl)
+            .set('Authorization', 'Bearer invalid.token').expect(401);
+        await request(f.server).delete(f.favoriteUrl)
+            .set('Authorization', 'Bearer invalid.token').expect(401);
+        await f.expectCount(0);
     }, 40000);
 
+    it('returns 404 for favorite or unfavorite on an unknown article', async () => {
+        const { server } = context();
+        const user = await registerUser();
+        const url = `/api/articles/missing-${randomUUID()}/favorite`;
+        await request(server).post(url)
+            .set('Authorization', user.authorization).expect(404);
+        await request(server).delete(url)
+            .set('Authorization', user.authorization).expect(404);
+    }, 40000);
 
+    it('favorites an article and persists exactly one relationship', async () => {
+        const f = await fixture();
+        await f.expectCount(0);
+        const response = await f.favorite(f.bob.authorization);
+        expect(response.body.article).toMatchObject({
+            slug: f.slug, favorited: true, favoritesCount: 1,
+        });
+        expect(await f.favorites.existsBy({
+            userId: f.bob.id, articleId: f.article.id,
+        })).toBe(true);
+        await f.expectCount(1);
+    }, 40000);
+
+    it('keeps repeated favorite requests idempotent', async () => {
+        const f = await fixture();
+        await f.favorite(f.bob.authorization);
+        for (let i = 0; i < 3; i++) {
+            const response = await f.favorite(f.bob.authorization);
+            expect(response.body.article).toMatchObject({
+                favorited: true, favoritesCount: 1,
+            });
+        }
+        await f.expectCount(1);
+    }, 40000);
+
+    it('counts favorites from distinct users', async () => {
+        const f = await fixture(true);
+        if (!f.charlie) throw new Error('Missing second viewer');
+        await f.favorite(f.bob.authorization);
+        const response = await f.favorite(f.charlie.authorization);
+        expect(response.body.article).toMatchObject({
+            favorited: true, favoritesCount: 2,
+        });
+        for (const user of [f.bob, f.charlie]) {
+            expect(await f.favorites.existsBy({
+                articleId: f.article.id, userId: user.id,
+            })).toBe(true);
+        }
+        await f.expectCount(2);
+    }, 40000);
+
+    it('returns viewer-specific favorite state on article detail', async () => {
+        const f = await fixture(true);
+        if (!f.charlie) throw new Error('Missing second viewer');
+        await f.favorite(f.bob.authorization);
+        await f.favorite(f.charlie.authorization);
+        const anonymous = await request(f.server).get(f.detailUrl).expect(200);
+        expect(anonymous.body.article).toMatchObject({
+            favorited: false, favoritesCount: 2,
+        });
+        const bobDetail = await request(f.server).get(f.detailUrl)
+            .set('Authorization', f.bob.authorization).expect(200);
+        expect(bobDetail.body.article).toMatchObject({
+            favorited: true, favoritesCount: 2,
+        });
+        const aliceDetail = await request(f.server).get(f.detailUrl)
+            .set('Authorization', f.alice.authorization).expect(200);
+        expect(aliceDetail.body.article).toMatchObject({
+            favorited: false, favoritesCount: 2,
+        });
+    }, 40000);
+
+    it('unfavorites an article without removing another user\'s favorite', async () => {
+        const f = await fixture(true);
+        if (!f.charlie) throw new Error('Missing second viewer');
+        await f.favorite(f.bob.authorization);
+        await f.favorite(f.charlie.authorization);
+        const response = await f.unfavorite(f.bob.authorization);
+        expect(response.body.article).toMatchObject({
+            favorited: false, favoritesCount: 1,
+        });
+        expect(await f.favorites.existsBy({
+            userId: f.bob.id, articleId: f.article.id,
+        })).toBe(false);
+        expect(await f.favorites.existsBy({
+            userId: f.charlie.id, articleId: f.article.id,
+        })).toBe(true);
+        await f.expectCount(1);
+    }, 40000);
+
+    it('keeps repeated unfavorite requests idempotent', async () => {
+        const f = await fixture(true);
+        if (!f.charlie) throw new Error('Missing second viewer');
+        await f.favorite(f.bob.authorization);
+        await f.favorite(f.charlie.authorization);
+        await f.unfavorite(f.bob.authorization);
+        const response = await f.unfavorite(f.bob.authorization);
+        expect(response.body.article).toMatchObject({
+            favorited: false, favoritesCount: 1,
+        });
+        await f.expectCount(1);
+    }, 40000);
+
+    it('handles ten concurrent favorites without duplicate relationships', async () => {
+        const f = await fixture(true);
+        if (!f.charlie) throw new Error('Missing second viewer');
+        await f.favorite(f.charlie.authorization);
+        const responses = await Promise.all(Array.from({ length: 10 }, () =>
+            f.favorite(f.bob.authorization),
+        ));
+        for (const response of responses) {
+            expect(response.body.article).toMatchObject({
+                favorited: true, favoritesCount: 2,
+            });
+        }
+        expect(await f.favorites.countBy({
+            userId: f.bob.id, articleId: f.article.id,
+        })).toBe(1);
+        await f.expectCount(2);
+    }, 40000);
+
+    it('handles ten concurrent unfavorites and preserves other favorites', async () => {
+        const f = await fixture(true);
+        if (!f.charlie) throw new Error('Missing second viewer');
+        await f.favorite(f.bob.authorization);
+        await f.favorite(f.charlie.authorization);
+        const responses = await Promise.all(Array.from({ length: 10 }, () =>
+            f.unfavorite(f.bob.authorization),
+        ));
+        for (const response of responses) {
+            expect(response.body.article).toMatchObject({
+                favorited: false, favoritesCount: 1,
+            });
+        }
+        expect(await f.favorites.countBy({
+            userId: f.bob.id, articleId: f.article.id,
+        })).toBe(0);
+        expect(await f.favorites.existsBy({
+            userId: f.charlie.id, articleId: f.article.id,
+        })).toBe(true);
+        await f.expectCount(1);
+    }, 40000);
+
+    it('keeps article listing and favorite filters consistent after favoriting', async () => {
+        const f = await fixture(true);
+        if (!f.charlie) throw new Error('Missing second viewer');
+        await f.favorite(f.bob.authorization);
+        await f.favorite(f.charlie.authorization);
+        const listing = await request(f.server).get('/api/articles')
+            .set('Authorization', f.bob.authorization)
+            .query({ tag: f.scopeTag }).expect(200);
+        expect(listing.body.articlesCount).toBe(1);
+        expect(listing.body.articles).toMatchObject([
+            { slug: f.slug, favorited: true, favoritesCount: 2 },
+        ]);
+        const filtered = await request(f.server).get('/api/articles')
+            .query({ tag: f.scopeTag, favorited: f.bob.username }).expect(200);
+        expect(filtered.body.articlesCount).toBe(1);
+        expect(filtered.body.articles.map((item: { slug: string }) => item.slug))
+            .toEqual([f.slug]);
+    }, 40000);
+
+    it('updates article listing and favorite filters after unfavoriting', async () => {
+        const f = await fixture(true);
+        if (!f.charlie) throw new Error('Missing second viewer');
+        await f.favorite(f.bob.authorization);
+        await f.favorite(f.charlie.authorization);
+        await f.unfavorite(f.bob.authorization);
+        const filtered = await request(f.server).get('/api/articles')
+            .query({ tag: f.scopeTag, favorited: f.bob.username }).expect(200);
+        expect(filtered.body.articles).toEqual([]);
+        expect(filtered.body.articlesCount).toBe(0);
+        const listing = await request(f.server).get('/api/articles')
+            .set('Authorization', f.bob.authorization)
+            .query({ tag: f.scopeTag }).expect(200);
+        expect(listing.body.articlesCount).toBe(1);
+        expect(listing.body.articles).toMatchObject([
+            { slug: f.slug, favorited: false, favoritesCount: 1 },
+        ]);
+        await f.expectCount(1);
+    }, 40000);
+
+    it('cascades favorites when an article is deleted', async () => {
+        const f = await fixture();
+        await f.favorite(f.bob.authorization);
+        await f.expectCount(1);
+        await request(f.server).delete(f.detailUrl)
+            .set('Authorization', f.alice.authorization).expect(204);
+        await f.expectCount(0);
+        expect(await f.articles.existsBy({ id: f.article.id })).toBe(false);
+        await request(f.server).post(f.favoriteUrl)
+            .set('Authorization', f.bob.authorization).expect(404);
+    }, 40000);
 });

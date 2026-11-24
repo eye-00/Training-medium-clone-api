@@ -51,15 +51,8 @@ export class ArticlesService {
         const articleId = randomUUID();
         const slug = generateSlug(input.title, articleId);
 
-        const tagNames = [
-            ...new Set(
-                (input.tagList ?? []).map((tag) =>
-                    tag.trim().toLowerCase(),
-                ),
-            ),
-        ].sort();
 
-        return this.retryOnDeadlock(() => this.dataSource.transaction(async (manager) => {
+        return this.retryOnDeadlock(() => this.dataSource.transaction('READ COMMITTED', async (manager) => {
             const articlesRepository = manager.getRepository(Article);
 
             await articlesRepository.insert({
@@ -71,35 +64,20 @@ export class ArticlesService {
                 authorId: user.id,
             });
 
+
             await this.replaceArticleTags(
                 manager,
                 articleId,
-                tagNames,
+                input.tagList ?? [],
             );
 
-            const article = await articlesRepository.findOneByOrFail({
-                id: articleId,
-            });
+            // Build the response from persisted database data.
+            return this.findOne(
+                slug,
+                user.id,
+                manager,
+            );
 
-            return {
-                article: {
-                    slug: article.slug,
-                    title: article.title,
-                    description: article.description,
-                    body: article.body,
-                    tagList: tagNames,
-                    createdAt: article.createdAt.toISOString(),
-                    updatedAt: article.updatedAt.toISOString(),
-                    favorited: false,
-                    favoritesCount: 0,
-                    author: {
-                        username: user.username,
-                        bio: user.bio,
-                        image: user.image,
-                        following: false,
-                    },
-                },
-            };
         }));
 
     }
@@ -216,103 +194,97 @@ export class ArticlesService {
             );
         }
 
-        const tagNames =
-            input.tagList === undefined
-                ? undefined
-                : [
-                    ...new Set(
-                        input.tagList.map((tag) =>
-                            tag.trim().toLowerCase(),
-                        ),
-                    ),
-                ].sort();
+        const tagNames = input.tagList;
 
-        return this.dataSource.transaction(
-            async (manager): Promise<ArticleResponseDto> => {
-                const articlesRepository =
-                    manager.getRepository(Article);
+        return this.retryOnDeadlock(() =>
+            this.dataSource.transaction(
+                'READ COMMITTED',
+                async (manager): Promise<ArticleResponseDto> => {
+                    const articlesRepository =
+                        manager.getRepository(Article);
 
-                const article = await articlesRepository
-                    .createQueryBuilder('article')
-                    .setLock('pessimistic_write')
-                    .where('article.slug = :slug', { slug })
-                    .getOne();
+                    const article = await articlesRepository
+                        .createQueryBuilder('article')
+                        .setLock('pessimistic_write')
+                        .where('article.slug = :slug', { slug })
+                        .getOne();
 
-                if (!article) {
-                    throw new NotFoundException(
-                        'Article not found',
-                    );
-                }
+                    if (!article) {
+                        throw new NotFoundException(
+                            'Article not found',
+                        );
+                    }
 
-                if (article.authorId !== userId) {
-                    throw new ForbiddenException(
-                        'You can only update your own articles',
-                    );
-                }
+                    if (article.authorId !== userId) {
+                        throw new ForbiddenException(
+                            'You can only update your own articles',
+                        );
+                    }
 
-                const updates: Partial<
-                    Pick<
-                        Article,
-                        'title' | 'description' | 'body' | 'slug'
-                    >
-                > = {};
+                    const updates: Partial<
+                        Pick<
+                            Article,
+                            'title' | 'description' | 'body' | 'slug'
+                        >
+                    > = {};
 
-                if (input.title !== undefined) {
-                    updates.title = input.title;
-                    updates.slug = generateSlug(
-                        input.title,
-                        article.id,
-                    );
-                }
+                    if (input.title !== undefined) {
+                        updates.title = input.title;
+                        updates.slug = generateSlug(
+                            input.title,
+                            article.id,
+                        );
+                    }
 
-                if (input.description !== undefined) {
-                    updates.description = input.description;
-                }
+                    if (input.description !== undefined) {
+                        updates.description = input.description;
+                    }
 
-                if (input.body !== undefined) {
-                    updates.body = input.body;
-                }
+                    if (input.body !== undefined) {
+                        updates.body = input.body;
+                    }
 
-                const updatedSlug =
-                    updates.slug ?? article.slug;
+                    const updatedSlug =
+                        updates.slug ?? article.slug;
 
-                // Case 1: Main article fields changed.
-                if (Object.keys(updates).length > 0) {
-                    await articlesRepository.update(
-                        { id: article.id },
-                        updates,
-                    );
-                }
+                    // Case 1: Main article fields changed.
+                    if (Object.keys(updates).length > 0) {
+                        await articlesRepository.update(
+                            { id: article.id },
+                            updates,
+                        );
+                    }
 
-                // Case 2: Only tagList is being updated.
-                // Touch the article row to advance updatedAt.
-                else if (tagNames !== undefined) {
-                    await articlesRepository.update(
-                        { id: article.id },
-                        {
-                            updatedAt: () => 'CURRENT_TIMESTAMP(6)',
-                        },
-                    );
-                }
+                    // Case 2: Only tagList is being updated.
+                    // Touch the article row to advance updatedAt.
+                    else if (tagNames !== undefined) {
+                        await articlesRepository.update(
+                            { id: article.id },
+                            {
+                                updatedAt: () => 'CURRENT_TIMESTAMP(6)',
+                            },
+                        );
+                    }
 
-                // Replace article-tag relationships only
-                // when tagList was provided.
-                if (tagNames !== undefined) {
-                    await this.replaceArticleTags(
+                    // Replace article-tag relationships only
+                    // when tagList was provided.
+                    if (tagNames !== undefined) {
+                        await this.replaceArticleTags(
+                            manager,
+                            article.id,
+                            tagNames,
+                        );
+                    }
+
+                    // Read the updated article using the
+                    // SAME transactional EntityManager.
+                    return this.findOne(
+                        updatedSlug,
+                        userId,
                         manager,
-                        article.id,
-                        tagNames,
                     );
-                }
-
-                // Read the updated article using the
-                // SAME transactional EntityManager.
-                return this.findOne(
-                    updatedSlug,
-                    userId,
-                    manager,
-                );
-            },
+                },
+            ),
         );
     }
 
@@ -675,58 +647,78 @@ export class ArticlesService {
         });
     }
 
-    private async replaceArticleTags(
-        manager: EntityManager,
-        articleId: string,
-        rawTagNames: string[],
-    ): Promise<void> {
-        const tagsRepository = manager.getRepository(Tag);
-        const linksRepository =
-            manager.getRepository(ArticleTag);
 
-        // Normalize and remove exact duplicates.
-        const tagNames = [
+    private normalizeTagNames(
+        rawTagNames: string[],
+    ): string[] {
+        return [
             ...new Set(
                 rawTagNames.map((name) =>
                     name.trim().toLowerCase(),
                 ),
             ),
         ].sort();
+    }
 
-        // Deduplicate by the database's canonical tag ID.
-        const tagIds = new Set<string>();
+    private async replaceArticleTags(
+        manager: EntityManager,
+        articleId: string,
+        rawTagNames: string[],
+    ): Promise<void> {
+        const tagNames = this.normalizeTagNames(rawTagNames);
 
-        for (const tagName of tagNames) {
-            // The unique index is the final authority
-            // on whether a tag already exists.
-            await manager.query(
-                'INSERT INTO `tags` (`id`, `name`) ' +
-                'VALUES (?, ?) ' +
-                'ON DUPLICATE KEY UPDATE `id` = `id`',
-                [randomUUID(), tagName],
+        const tagsRepository = manager.getRepository(Tag);
+        const linksRepository =
+            manager.getRepository(ArticleTag);
+
+        let tagIds: string[] = [];
+
+        if (tagNames.length > 0) {
+            // Bulk insert all tag names in a single query.
+            // Let the database unique index handle
+            // case/accent-insensitive duplicates.
+            const placeholders = tagNames
+                .map(() => '(?, ?)')
+                .join(', ');
+
+            const parameters = tagNames.flatMap(
+                (name) => [randomUUID(), name],
             );
 
-            const tag = await tagsRepository.findOneByOrFail({
-                name: tagName,
+            await manager.query(
+                'INSERT INTO `tags` (`id`, `name`) VALUES ' +
+                placeholders +
+                ' ON DUPLICATE KEY UPDATE `id` = `id`',
+                parameters,
+            );
+
+            // Retrieve canonical tag IDs in one query.
+            // MySQL collation determines logical equality.
+            const storedTags = await tagsRepository.findBy({
+                name: In(tagNames),
             });
 
-            tagIds.add(tag.id);
+            // Multiple input names may resolve to
+            // the same canonical database tag ID.
+            tagIds = [
+                ...new Set(storedTags.map((tag) => tag.id)),
+            ].sort();
         }
 
-        // Replace all existing relationships.
+        // Replace relationships within the existing
+        // transaction.
         await linksRepository.delete({ articleId });
 
-        if (tagIds.size > 0) {
-            const sortedTagIds = [...tagIds].sort();
-
+        if (tagIds.length > 0) {
             await linksRepository.insert(
-                sortedTagIds.map((tagId) => ({
+                tagIds.map((tagId) => ({
                     articleId,
                     tagId,
                 })),
             );
         }
     }
+
 
     private async retryOnDeadlock<T>(
         operation: () => Promise<T>,
