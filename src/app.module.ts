@@ -18,6 +18,8 @@ import { ConfigModule, ConfigService } from '@nestjs/config'
 
 import { UsersModule } from './users/users.module.js';
 import { AuthModule } from './auth/auth.module.js';
+import { ProfilesModule } from './profiles/profiles.module.js';
+import { AttachmentsModule } from './attachments/attachments.module.js';
 @Module({
   imports: [
     ConfigModule.forRoot({
@@ -57,6 +59,8 @@ import { AuthModule } from './auth/auth.module.js';
     RedisModule,
     UsersModule,
     AuthModule,
+    ProfilesModule,
+    AttachmentsModule,
 
   ],
   controllers: [AppController],
