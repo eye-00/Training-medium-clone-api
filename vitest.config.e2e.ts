@@ -21,6 +21,10 @@ export default defineConfig({
       'test/article-feed.e2e-spec.ts',
       'test/article-tags.e2e-spec.ts',
       'test/article-concurrency.e2e-spec.ts',
+      'test/comment-create.e2e-spec.ts',
+      'test/comment-list.e2e-spec.ts',
+      'test/comment-delete.e2e-spec.ts',
+      'test/comment-concurrency.e2e-spec.ts',
     ],
   },
 });
