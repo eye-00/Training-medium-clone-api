@@ -88,8 +88,8 @@ describe('Shared User Fixture', () => {
 
         const user = await registerUserFixture(
             context,
-            createdUsers,
             { prefix: 'cmt' },
+            createdUsers,
         );
 
         expect(user.id).toBe('test-user-id');
@@ -161,14 +161,14 @@ describe('Shared User Fixture', () => {
 
         const first = await registerUserFixture(
             context,
-            createdUsers,
             options,
+            createdUsers,
         );
 
         const second = await registerUserFixture(
             context,
-            createdUsers,
             options,
+            createdUsers,
         );
 
         expect(first.id).not.toBe(second.id);
@@ -208,8 +208,8 @@ describe('Shared User Fixture', () => {
         await expect(
             registerUserFixture(
                 context,
-                createdUsers,
                 { prefix: 'cmt' },
+                createdUsers,
             ),
         ).rejects.toBe(error);
 
@@ -248,8 +248,8 @@ describe('Shared User Fixture', () => {
         await expect(
             registerUserFixture(
                 context,
-                createdUsers,
                 { prefix: 'cmt' },
+                createdUsers,
             ),
         ).rejects.toBe(error);
 
@@ -271,8 +271,8 @@ describe('Shared User Fixture', () => {
         await expect(
             registerUserFixture(
                 context,
-                createdUsers,
                 { prefix: 'cmt' },
+                createdUsers,
             ),
         ).rejects.toThrow(
             'User fixture login returned an invalid access token',

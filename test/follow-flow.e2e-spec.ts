@@ -17,15 +17,12 @@ import {
 } from './helpers/test-app.helper.js';
 
 import {
-    cleanupUserFixtures,
     registerUserFixture,
-    type CreatedUser,
 } from './helpers/user-fixture.helper.js';
 
 describe('Follow / Unfollow E2E', () => {
     let testApp: TestAppContext | undefined;
 
-    const createdUsers: CreatedUser[] = [];
 
     const suffix = randomUUID()
         .replaceAll('-', '')
@@ -49,17 +46,7 @@ describe('Follow / Unfollow E2E', () => {
     });
 
     afterAll(async () => {
-        if (!testApp) return;
-
-        await closeTestApp(
-            testApp,
-            async ({ db }) => {
-                await cleanupUserFixtures(
-                    db,
-                    createdUsers,
-                );
-            },
-        );
+        if (testApp) await closeTestApp(testApp);
     });
 
 
@@ -78,10 +65,6 @@ describe('Follow / Unfollow E2E', () => {
         const followerId =
             followerResponse.body.user.id as string;
 
-        createdUsers.push({
-            id: followerId,
-            email: follower.email,
-        });
 
         const targetResponse = await request(server)
             .post('/api/users')
@@ -91,10 +74,6 @@ describe('Follow / Unfollow E2E', () => {
         const targetId =
             targetResponse.body.user.id as string;
 
-        createdUsers.push({
-            id: targetId,
-            email: target.email,
-        });
 
         const login = await request(server)
             .post('/api/users/login')
@@ -265,9 +244,9 @@ describe('Follow / Unfollow E2E', () => {
         }
 
         const { server, db } = testApp;
-        const alice = await registerUserFixture(testApp, createdUsers, { prefix: 'follow_a' });
-        const bob = await registerUserFixture(testApp, createdUsers, { prefix: 'follow_b' });
-        const charlie = await registerUserFixture(testApp, createdUsers, { prefix: 'follow_c' });
+        const alice = await registerUserFixture(testApp, { prefix: 'follow_a' });
+        const bob = await registerUserFixture(testApp, { prefix: 'follow_b' });
+        const charlie = await registerUserFixture(testApp, { prefix: 'follow_c' });
         const followUrl = `/api/profiles/${charlie.username}/follow`;
         const follows = db.getRepository(Follow);
         const aliceEdge = { followerId: alice.id, followedId: charlie.id };

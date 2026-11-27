@@ -264,13 +264,13 @@ describe('Shared Article Fixture', () => {
         const createdTags = new Set<string>();
 
         const first = makeUniqueTag(
-            createdTags,
             'scope',
+            createdTags,
         );
 
         const second = makeUniqueTag(
-            createdTags,
             'scope',
+            createdTags,
         );
 
         expect(first)

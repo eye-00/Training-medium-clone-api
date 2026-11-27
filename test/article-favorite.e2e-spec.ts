@@ -21,23 +21,16 @@ import {
 
 import {
     registerUserFixture,
-    cleanupUserFixtures,
-    type CreatedUser,
 } from './helpers/user-fixture.helper.js';
 
 import {
+    seedTagFixture,
     createArticleFixture,
-    cleanupOwnedTagFixtures,
-    createOwnedTagFixture,
-    OwnedTagRegistry,
 } from './helpers/article-fixture.helper.js';
-import { runCleanupStages } from './helpers/cleanup-stages.helper.js';
 
 describe('Article Favorite E2E', () => {
     let testApp: TestAppContext | undefined;
 
-    const createdUsers: CreatedUser[] = [];
-    const createdTags = new OwnedTagRegistry();
 
     beforeAll(async () => {
         testApp = await createTestApp({
@@ -46,17 +39,7 @@ describe('Article Favorite E2E', () => {
     });
 
     afterAll(async () => {
-        if (!testApp) return;
-
-        await closeTestApp(
-            testApp,
-            async ({ db, identity }) => {
-                await runCleanupStages([
-                    () => cleanupUserFixtures(db, createdUsers),
-                    () => cleanupOwnedTagFixtures(db, createdTags, identity.serverUuid),
-                ]);
-            },
-        );
+        if (testApp) await closeTestApp(testApp);
     });
 
     function context(): TestAppContext {
@@ -69,14 +52,13 @@ describe('Article Favorite E2E', () => {
 
     async function makeTag(prefix: string): Promise<string> {
         const name = `${prefix}_${randomUUID().replaceAll('-', '')}`;
-        const { db, identity } = context();
-        return (await createOwnedTagFixture(db, createdTags, name, identity.serverUuid)).name;
+        const { db } = context();
+        return seedTagFixture(db, name);
     }
 
     function registerUser() {
         return registerUserFixture(
             context(),
-            createdUsers,
             { prefix: 'fav' },
         );
     }

@@ -20,8 +20,6 @@ import {
 
 import {
     registerUserFixture,
-    cleanupUserFixtures,
-    type CreatedUser,
 } from './helpers/user-fixture.helper.js';
 
 import {
@@ -36,24 +34,13 @@ import {
 describe('Comment Create E2E', () => {
     let testApp: TestAppContext | undefined;
 
-    const createdUsers: CreatedUser[] = [];
 
     beforeAll(async () => {
         testApp = await createTestApp();
     });
 
     afterAll(async () => {
-        if (!testApp) return;
-
-        await closeTestApp(
-            testApp,
-            async ({ db }) => {
-                await cleanupUserFixtures(
-                    db,
-                    createdUsers,
-                );
-            },
-        );
+        if (testApp) await closeTestApp(testApp);
     });
 
     function context(): TestAppContext {
@@ -67,7 +54,6 @@ describe('Comment Create E2E', () => {
     function registerUser() {
         return registerUserFixture(
             context(),
-            createdUsers,
             { prefix: 'cmt' },
         );
     }

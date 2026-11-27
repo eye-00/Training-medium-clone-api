@@ -1,5 +1,4 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import { compare } from 'bcryptjs';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
@@ -8,76 +7,14 @@ import { ArticleTag } from '../src/articles/entities/article-tag.entity.js';
 import { Tag } from '../src/articles/entities/tag.entity.js';
 import { User } from '../src/users/entities/user.entity.js';
 import { closeTestApp, createTestApp, type TestAppContext } from './helpers/test-app.helper.js';
-import { cleanupUserFixtures, type CreatedUser } from './helpers/user-fixture.helper.js';
 
 describe('Article storage validation E2E', () => {
     let app: TestAppContext | undefined;
-    const pendingUsers: Array<{ email: string; username: string; password: string; id?: string }> = [];
-    const ownedTags: Array<{ id: string; name: string; confirmed: boolean }> = [];
-    const absentTags: string[] = [];
 
     beforeAll(async () => { app = await createTestApp(); });
     afterAll(async () => {
-        if (!app) return;
-        await closeTestApp(app, async ({ db }) => {
-            const errors: unknown[] = [];
-            const users: CreatedUser[] = [];
-            for (const pending of pendingUsers) {
-                try {
-                    const row = await db.getRepository(User).createQueryBuilder('user')
-                        .addSelect('user.passwordHash')
-                        .where('user.email = :email', { email: pending.email })
-                        .getOne();
-                    if (!row) continue;
-                    if (row.email !== pending.email || row.username !== pending.username ||
-                        (pending.id !== undefined && row.id !== pending.id) ||
-                        !(await compare(pending.password, row.passwordHash))) {
-                        throw new Error('Test user ownership could not be verified');
-                    }
-                    users.push({ id: row.id, email: pending.email });
-                } catch (error: unknown) { errors.push(error); }
-            }
-            try { await cleanupUserFixtures(db, users); }
-            catch (error: unknown) { errors.push(error); }
-            for (const user of users) {
-                try {
-                    if (await db.getRepository(User).existsBy({ id: user.id, email: user.email })) {
-                        throw new Error('User fixture cleanup incomplete');
-                    }
-                } catch (error: unknown) { errors.push(error); }
-            }
-            for (const tag of ownedTags) {
-                try {
-                    const existing = await db.getRepository(Tag).findOneBy({ id: tag.id });
-                    if (!existing) {
-                        if (tag.confirmed) throw new Error('Owned tag unexpectedly missing');
-                        continue;
-                    }
-                    if (!tag.confirmed || existing.name !== tag.name) {
-                        throw new Error('Tag ownership could not be verified');
-                    }
-                    const result = await db.query(
-                        'DELETE FROM tags WHERE id = ? AND BINARY name = BINARY ? ' +
-                        'AND NOT EXISTS (SELECT 1 FROM article_tags WHERE tag_id = ?)',
-                        [tag.id, tag.name, tag.id],
-                    ) as { affectedRows: number };
-                    if (result.affectedRows !== 1) throw new Error('Owned tag still referenced or changed');
-                    if (await db.getRepository(Tag).countBy({ id: tag.id }) ||
-                        await db.getRepository(ArticleTag).countBy({ tagId: tag.id })) {
-                        throw new Error('Owned tag cleanup incomplete');
-                    }
-                } catch (error: unknown) { errors.push(error); }
-            }
-            for (const name of absentTags) {
-                try {
-                    if (await db.getRepository(Tag).existsBy({ name })) {
-                        throw new Error('Unexpected candidate tag remains; ownership is uncertain');
-                    }
-                } catch (error: unknown) { errors.push(error); }
-            }
-            if (errors.length) throw new AggregateError(errors, 'Fixture cleanup failed');
-        });
-    }, 30000);
+        if (app) await closeTestApp(app);
+    });
 
     function context(): TestAppContext {
         if (!app) throw new Error('Test app not initialized');
@@ -93,13 +30,10 @@ describe('Article storage validation E2E', () => {
         if (await db.getRepository(User).exists({ where: [{ email }, { username }] })) {
             throw new Error('Generated test user already exists');
         }
-        const pending: (typeof pendingUsers)[number] = { email, username, password };
-        pendingUsers.push(pending);
         const registration = await request(server).post('/api/users')
             .send({ email, username, password }).expect(201);
         const id: unknown = registration.body.user?.id;
         if (typeof id !== 'string' || !id) throw new Error('Missing test user ID');
-        pending.id = id;
         const login = await request(server).post('/api/users/login')
             .send({ email, password }).expect(200);
         const token: unknown = login.body.accessToken;
@@ -113,10 +47,7 @@ describe('Article storage validation E2E', () => {
         if (await tags.existsBy({ name })) throw new Error('Generated test tag already exists');
         const id = randomUUID();
         if (await tags.existsBy({ id })) throw new Error('Generated test tag ID already exists');
-        const tag = { id, name, confirmed: false };
-        ownedTags.push(tag);
         await tags.insert({ id, name });
-        tag.confirmed = true;
         return id;
     }
 
@@ -124,7 +55,6 @@ describe('Article storage validation E2E', () => {
         if (await context().db.getRepository(Tag).existsBy({ name })) {
             throw new Error('Generated test tag already exists');
         }
-        absentTags.push(name);
     }
 
     async function create(authorization: string, title: string, tagList: string[]) {

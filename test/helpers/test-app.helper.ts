@@ -14,6 +14,7 @@ import type { Server } from 'node:http';
 
 import { DataSource } from 'typeorm';
 import { configureBodyParser } from '../../src/config/body-parser.js';
+import { assertDedicatedE2eEnvironment, verifyDedicatedE2eDatabase } from './dedicated-e2e-database.js';
 
 import {
     assertSafeTestEnvironment,
@@ -68,8 +69,10 @@ async function closeAfterFailure(
 export async function createTestApp(
     options: TestAppOptions = {},
 ): Promise<TestAppContext> {
-    const expectedServerUuid =
-        assertSafeTestEnvironment();
+    const dedicated = process.env.E2E_TRUNCATE_DATABASE !== undefined;
+    const expectedServerUuid = dedicated
+        ? assertDedicatedE2eEnvironment()
+        : assertSafeTestEnvironment();
 
     let moduleRef: TestingModule | undefined;
     let app: INestApplication | undefined;
@@ -104,11 +107,9 @@ export async function createTestApp(
 
         const db = app.get(DataSource);
 
-        const identity =
-            await verifyTestDatabaseIdentity(
-                db,
-                expectedServerUuid,
-            );
+        const identity = dedicated
+            ? await verifyDedicatedE2eDatabase(db, expectedServerUuid)
+            : await verifyTestDatabaseIdentity(db, expectedServerUuid);
 
         if (options.listen) {
             await app.listen(0, '127.0.0.1');

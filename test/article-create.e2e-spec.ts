@@ -6,12 +6,9 @@ import {
 
 import {
     registerUserFixture,
-    cleanupUserFixtures,
-    type CreatedUser,
 } from './helpers/user-fixture.helper.js';
 
 import {
-    cleanupTagFixtures,
     makeUniqueTag,
 } from './helpers/article-fixture.helper.js';
 import { randomUUID } from 'node:crypto';
@@ -33,30 +30,13 @@ describe('Article Create E2E', () => {
 
     let testApp: TestAppContext | undefined;
 
-    const createdUsers: CreatedUser[] = [];
-    const createdTags = new Set<string>();
 
     beforeAll(async () => {
         testApp = await createTestApp();
     });
 
     afterAll(async () => {
-        if (!testApp) return;
-
-        await closeTestApp(
-            testApp,
-            async ({ db }) => {
-                await cleanupUserFixtures(
-                    db,
-                    createdUsers,
-                );
-
-                await cleanupTagFixtures(
-                    db,
-                    createdTags,
-                );
-            },
-        );
+        if (testApp) await closeTestApp(testApp);
     });
 
     function context(): TestAppContext {
@@ -69,7 +49,6 @@ describe('Article Create E2E', () => {
 
     function makeTag(prefix: string): string {
         return makeUniqueTag(
-            createdTags,
             prefix,
         );
     }
@@ -89,7 +68,6 @@ describe('Article Create E2E', () => {
     async function registerAuthor() {
         const user = await registerUserFixture(
             context(),
-            createdUsers,
             { prefix: 'article' },
         );
 

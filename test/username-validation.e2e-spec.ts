@@ -1,12 +1,8 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import request from 'supertest';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { User } from '../src/users/entities/user.entity.js';
-import {
-    assertSafeTestEnvironment,
-    verifyTestDatabaseIdentity,
-} from './helpers/database-safety.helper.js';
 import {
     closeTestApp,
     createTestApp,
@@ -17,7 +13,6 @@ type Fixture = { email: string; username: string; id?: string };
 
 describe('Unicode username validation E2E', () => {
     let testApp: TestAppContext | undefined;
-    const fixtures: Fixture[] = [];
     const password = 'ExamplePass123!';
     const plane = '✈️';
     const emojiChoices = ['😀', '😃', '😄', '😁', '😆', '😅', '😂', '🙂'];
@@ -26,44 +21,8 @@ describe('Unicode username validation E2E', () => {
         testApp = await createTestApp();
     });
 
-    async function cleanupFixtures(context: TestAppContext): Promise<void> {
-        const users = context.db.getRepository(User);
-        const errors: unknown[] = [];
-        for (const fixture of fixtures) {
-            try {
-                const existing = await users.findOneBy({ email: fixture.email });
-                if (existing) {
-                    if (!fixture.id || existing.id !== fixture.id) {
-                        throw new Error('Username fixture identity mismatch');
-                    }
-                    await users.delete({ id: fixture.id, email: fixture.email });
-                }
-                if (await users.countBy({ email: fixture.email })) {
-                    throw new Error('Username fixture cleanup incomplete');
-                }
-            } catch (error: unknown) {
-                errors.push(error);
-            }
-        }
-        if (errors.length) {
-            throw new AggregateError(errors, 'Username fixture cleanup failed');
-        }
-        fixtures.length = 0;
-    }
-
-    afterEach(async () => {
-        if (!testApp || fixtures.length === 0) return;
-        const expectedUuid = assertSafeTestEnvironment();
-        if (expectedUuid !== testApp.identity.serverUuid) {
-            throw new Error('Test database identity changed');
-        }
-        await verifyTestDatabaseIdentity(testApp.db, expectedUuid);
-        await cleanupFixtures(testApp);
-    });
-
     afterAll(async () => {
-        if (!testApp) return;
-        await closeTestApp(testApp, cleanupFixtures);
+        if (testApp) await closeTestApp(testApp);
     });
 
     function context(): TestAppContext {
@@ -90,7 +49,6 @@ describe('Unicode username validation E2E', () => {
         if (await users.existsBy({ username })) {
             throw new Error('Username fixture collision');
         }
-        fixtures.push(value);
         return value;
     }
 

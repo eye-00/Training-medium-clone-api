@@ -22,20 +22,15 @@ import {
 
 import {
     registerUserFixture,
-    cleanupUserFixtures,
-    type CreatedUser,
 } from './helpers/user-fixture.helper.js';
 
 import {
-    cleanupTagFixtures,
     makeUniqueTag,
 } from './helpers/article-fixture.helper.js';
 
 describe('Article Tags E2E', () => {
     let testApp: TestAppContext | undefined;
 
-    const createdUsers: CreatedUser[] = [];
-    const createdTagNames = new Set<string>();
 
     beforeAll(async () => {
         testApp = await createTestApp({
@@ -44,23 +39,8 @@ describe('Article Tags E2E', () => {
     });
 
     afterAll(async () => {
-        if (!testApp) return;
-
-        await closeTestApp(
-            testApp,
-            async ({ db }) => {
-                await cleanupUserFixtures(
-                    db,
-                    createdUsers,
-                );
-
-                await cleanupTagFixtures(
-                    db,
-                    createdTagNames,
-                );
-            },
-        );
-    }, 30000);
+        if (testApp) await closeTestApp(testApp);
+    });
 
     function context(): TestAppContext {
         if (!testApp) {
@@ -78,7 +58,6 @@ describe('Article Tags E2E', () => {
 
     function makeTag(label: string): string {
         return makeUniqueTag(
-            createdTagNames,
             `e2e_${label}`,
         );
     }
@@ -89,8 +68,6 @@ describe('Article Tags E2E', () => {
         const plain = `e2e_cafe_${suffix}`;
         const accented = `e2e_café_${suffix}`;
 
-        createdTagNames.add(plain);
-        createdTagNames.add(accented);
 
         return [plain, accented];
     }
@@ -98,7 +75,6 @@ describe('Article Tags E2E', () => {
     function registerUser() {
         return registerUserFixture(
             context(),
-            createdUsers,
             { prefix: 'tags' },
         );
     }

@@ -30,20 +30,15 @@ import {
 
 import {
     registerUserFixture,
-    cleanupUserFixtures,
-    type CreatedUser,
 } from './helpers/user-fixture.helper.js';
 
 import {
-    cleanupTagFixtures,
     makeUniqueTag,
 } from './helpers/article-fixture.helper.js';
 
 describe('Article Concurrency E2E', () => {
     let testApp: TestAppContext | undefined;
 
-    const createdUsers: CreatedUser[] = [];
-    const createdTags = new Set<string>();
 
     beforeAll(async () => {
         testApp = await createTestApp({
@@ -52,22 +47,7 @@ describe('Article Concurrency E2E', () => {
     });
 
     afterAll(async () => {
-        if (!testApp) return;
-
-        await closeTestApp(
-            testApp,
-            async ({ db }) => {
-                await cleanupUserFixtures(
-                    db,
-                    createdUsers,
-                );
-
-                await cleanupTagFixtures(
-                    db,
-                    createdTags,
-                );
-            },
-        );
+        if (testApp) await closeTestApp(testApp);
     });
 
     function context(): TestAppContext {
@@ -80,7 +60,6 @@ describe('Article Concurrency E2E', () => {
 
     function makeTag(prefix: string): string {
         return makeUniqueTag(
-            createdTags,
             prefix,
         );
     }
@@ -88,7 +67,6 @@ describe('Article Concurrency E2E', () => {
     function registerUser() {
         return registerUserFixture(
             context(),
-            createdUsers,
             { prefix: 'tx' },
         );
     }

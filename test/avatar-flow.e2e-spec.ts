@@ -5,6 +5,7 @@ import sharp from 'sharp';
 import {
     afterAll,
     beforeAll,
+    afterEach,
     describe,
     expect,
     it,
@@ -22,7 +23,6 @@ import {
 } from './helpers/test-app.helper.js';
 import {
     registerUserFixture,
-    type CreatedUser,
 } from './helpers/user-fixture.helper.js';
 
 import {
@@ -35,8 +35,6 @@ import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 describe('Avatar E2E', () => {
     let testApp: TestAppContext | undefined;
-    let createdUserId: string | undefined;
-    const additionalUsers: CreatedUser[] = [];
 
     let temporaryRoot: string | undefined;
 
@@ -86,65 +84,18 @@ describe('Avatar E2E', () => {
 
 
 
+    afterEach(async () => {
+        if (temporaryRoot) {
+            await rm(path.join(temporaryRoot, 'uploads', 'avatars'), { recursive: true, force: true });
+        }
+    });
+
     afterAll(async () => {
         const errors: unknown[] = [];
 
         if (testApp) {
             try {
-                await closeTestApp(
-                    testApp,
-                    async ({ db }) => {
-                        const fixtures = [
-                            ...(createdUserId
-                                ? [{ id: createdUserId, email }]
-                                : []),
-                            ...additionalUsers,
-                        ];
-                        const cleanupErrors: unknown[] = [];
-
-                        for (const fixture of fixtures) {
-                            try {
-                                await db.transaction(async (manager) => {
-                                    const usersRepository =
-                                        manager.getRepository(User);
-
-                                    const userExists =
-                                        await usersRepository.existsBy({
-                                            id: fixture.id,
-                                            email: fixture.email,
-                                        });
-
-                                    if (!userExists) {
-                                        throw new Error(
-                                            'Avatar fixture cleanup identity mismatch',
-                                        );
-                                    }
-
-                                    await manager
-                                        .getRepository(Attachment)
-                                        .delete({
-                                            ownerType: 'user',
-                                            ownerId: fixture.id,
-                                            kind: 'avatar',
-                                        });
-
-                                    await usersRepository.delete({
-                                        id: fixture.id,
-                                        email: fixture.email,
-                                    });
-                                });
-                            } catch (error: unknown) {
-                                cleanupErrors.push(error);
-                            }
-                        }
-                        if (cleanupErrors.length > 0) {
-                            throw new AggregateError(
-                                cleanupErrors,
-                                'Avatar fixture cleanup failed',
-                            );
-                        }
-                    },
-                );
+                await closeTestApp(testApp);
             } catch (error: unknown) {
                 errors.push(error);
             }
@@ -176,10 +127,10 @@ describe('Avatar E2E', () => {
             if (!testApp) throw new Error('Test application is not ready');
 
             const { app, server, db } = testApp;
-            const alice = await registerUserFixture(testApp, additionalUsers, {
+            const alice = await registerUserFixture(testApp, {
                 prefix: 'avatar_alice',
             });
-            const bob = await registerUserFixture(testApp, additionalUsers, {
+            const bob = await registerUserFixture(testApp, {
                 prefix: 'avatar_bob',
             });
             const storage = app.get(AvatarStorageService);
@@ -297,7 +248,6 @@ describe('Avatar E2E', () => {
             .expect(201);
 
         const userId = registration.body.user.id as string;
-        createdUserId = userId;
 
         const login = await request(server)
             .post('/api/users/login')

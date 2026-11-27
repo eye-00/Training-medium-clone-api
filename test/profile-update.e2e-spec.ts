@@ -18,15 +18,12 @@ import {
 } from './helpers/test-app.helper.js';
 
 import {
-  cleanupUserFixtures,
   registerUserFixture,
-  type CreatedUser,
 } from './helpers/user-fixture.helper.js';
 
 describe('Update Profile E2E', () => {
   let testApp: TestAppContext | undefined;
 
-  const createdUsers: CreatedUser[] = [];
 
   const suffix = randomUUID().replaceAll('-', '');
 
@@ -41,17 +38,7 @@ describe('Update Profile E2E', () => {
   });
 
   afterAll(async () => {
-    if (!testApp) return;
-
-    await closeTestApp(
-      testApp,
-      async ({ db }) => {
-        await cleanupUserFixtures(
-          db,
-          createdUsers,
-        );
-      },
-    );
+      if (testApp) await closeTestApp(testApp);
   });
 
   it('updates profile with validation and authorization', async () => {
@@ -68,13 +55,12 @@ describe('Update Profile E2E', () => {
       .expect(201);
 
     const userId = register.body.user.id as string;
-    createdUsers.push({ id: userId, email });
 
     // Register another user to test duplicate username
     const otherEmail =
       `e2e-other-${suffix}@example.com`;
 
-    const otherRegister = await request(server)
+    await request(server)
       .post('/api/users')
       .send({
         email: otherEmail,
@@ -83,10 +69,6 @@ describe('Update Profile E2E', () => {
       })
       .expect(201);
 
-    createdUsers.push({
-      id: otherRegister.body.user.id as string,
-      email: otherEmail,
-    });
 
     // Login
     const login = await request(server)
@@ -205,8 +187,8 @@ describe('Update Profile E2E', () => {
       throw new Error('Test app not initialized');
     }
 
-    const userA = await registerUserFixture(testApp, createdUsers, { prefix: 'profile_a' });
-    const userB = await registerUserFixture(testApp, createdUsers, { prefix: 'profile_b' });
+    const userA = await registerUserFixture(testApp, { prefix: 'profile_a' });
+    const userB = await registerUserFixture(testApp, { prefix: 'profile_b' });
     const users = testApp.db.getRepository(User);
     const loadUser = (id: string) => users.findOneByOrFail({ id });
     const beforeB = await loadUser(userB.id);
@@ -230,8 +212,8 @@ describe('Update Profile E2E', () => {
         throw new Error('Test app not initialized');
       }
 
-      const userA = await registerUserFixture(testApp, createdUsers, { prefix: 'protect_a' });
-      const userB = await registerUserFixture(testApp, createdUsers, { prefix: 'protect_b' });
+      const userA = await registerUserFixture(testApp, { prefix: 'protect_a' });
+      const userB = await registerUserFixture(testApp, { prefix: 'protect_b' });
       const users = testApp.db.getRepository(User);
       const loadUser = (id: string) => users.createQueryBuilder('user')
         .addSelect('user.passwordHash')

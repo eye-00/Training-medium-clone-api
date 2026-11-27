@@ -9,16 +9,13 @@ export default defineConfig({
         globals: true,
         root: './',
 
-        // Keep database and CPU contention predictable.
-        maxWorkers: 4,
-
-        // Allow application initialization and cleanup
-        // to complete under parallel execution.
+        // Each case owns the dedicated database until afterEach truncates it.
+        maxWorkers: 1,
         hookTimeout: 25000,
-
-        // Each suite must retain its own isolated state.
         isolate: true,
-        fileParallelism: true,
+        fileParallelism: false,
+        maxConcurrency: 1,
+        setupFiles: ['test/helpers/e2e.setup.ts'],
 
         include: [
             'test/auth-flow.e2e-spec.ts',

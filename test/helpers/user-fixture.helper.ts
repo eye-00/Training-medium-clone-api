@@ -36,8 +36,8 @@ export type UserFixtureOptions = Readonly<{
  */
 export async function registerUserFixture(
     context: Pick<TestAppContext, 'server'>,
-    createdUsers: CreatedUser[],
     options: UserFixtureOptions,
+    createdUsers?: CreatedUser[],
 ): Promise<UserFixture> {
     const suffix = randomUUID()
         .replaceAll('-', '');
@@ -72,7 +72,7 @@ export async function registerUserFixture(
         );
     }
 
-    createdUsers.push({
+    createdUsers?.push({
         id,
         email,
     });

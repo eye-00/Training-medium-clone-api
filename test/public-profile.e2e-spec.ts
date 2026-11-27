@@ -16,15 +16,10 @@ import {
     type TestAppContext,
 } from './helpers/test-app.helper.js';
 
-import {
-    cleanupUserFixtures,
-    type CreatedUser,
-} from './helpers/user-fixture.helper.js';
 
 describe('Public Profile E2E', () => {
     let testApp: TestAppContext | undefined;
 
-    const createdUsers: CreatedUser[] = [];
 
     const suffix = randomUUID().replaceAll('-', '').slice(0, 20);
     const password = 'ExamplePass123!';
@@ -50,17 +45,7 @@ describe('Public Profile E2E', () => {
     });
 
     afterAll(async () => {
-        if (!testApp) return;
-
-        await closeTestApp(
-            testApp,
-            async ({ db }) => {
-                await cleanupUserFixtures(
-                    db,
-                    createdUsers,
-                );
-            },
-        );
+        if (testApp) await closeTestApp(testApp);
     });
 
 
@@ -85,10 +70,6 @@ describe('Public Profile E2E', () => {
 
             const id = response.body.user.id as string;
 
-            createdUsers.push({
-                id,
-                email: user.email,
-            });
 
             ids.push(id);
         }

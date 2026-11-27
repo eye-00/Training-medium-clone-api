@@ -3,6 +3,7 @@ import request from 'supertest';
 import type { DataSource, EntityManager } from 'typeorm';
 
 import { Article } from '../../src/articles/entities/article.entity.js';
+import { Tag } from '../../src/articles/entities/tag.entity.js';
 
 import type {
     ArticleDetailsDto,
@@ -34,16 +35,21 @@ export type ArticleFixture = Readonly<{
  * any database operation can create it.
  */
 export function makeUniqueTag(
-    createdTags: Set<string>,
     prefix: string,
+    createdTags?: Set<string>,
 ): string {
     const suffix = randomUUID()
         .replaceAll('-', '');
 
     const name = `${prefix}_${suffix}`;
 
-    createdTags.add(name);
+    createdTags?.add(name);
 
+    return name;
+}
+
+export async function seedTagFixture(db: DataSource, name: string): Promise<string> {
+    await db.getRepository(Tag).insert({ id: randomUUID(), name });
     return name;
 }
 

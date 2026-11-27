@@ -7,14 +7,9 @@ import {
     createTestApp,
     type TestAppContext,
 } from './helpers/test-app.helper.js';
-import {
-    cleanupUserFixtures,
-    type CreatedUser,
-} from './helpers/user-fixture.helper.js';
 
 describe('Authentication response exposure E2E', () => {
     let testApp: TestAppContext | undefined;
-    const createdUsers: CreatedUser[] = [];
     const password = 'ExamplePass123!';
 
     beforeAll(async () => {
@@ -22,10 +17,7 @@ describe('Authentication response exposure E2E', () => {
     });
 
     afterAll(async () => {
-        if (!testApp) return;
-        await closeTestApp(testApp, async ({ db }) => {
-            await cleanupUserFixtures(db, createdUsers);
-        });
+        if (testApp) await closeTestApp(testApp);
     });
 
     function context(): TestAppContext {
@@ -45,7 +37,6 @@ describe('Authentication response exposure E2E', () => {
         if (typeof id !== 'string' || !id.trim()) {
             throw new Error('Registration returned an invalid user ID');
         }
-        createdUsers.push({ id, email });
         return { response, id, email, username };
     }
 

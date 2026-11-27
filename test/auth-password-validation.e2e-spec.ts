@@ -13,7 +13,6 @@ type Fixture = { email: string; username: string; id?: string };
 
 describe('Authentication password and primitive validation E2E', () => {
     let testApp: TestAppContext | undefined;
-    const fixtures: Fixture[] = [];
     const validPassword = '😀'.repeat(18); // 72 UTF-8 bytes.
     const oversizedPassword = `${validPassword}x`; // 73 UTF-8 bytes.
 
@@ -22,30 +21,7 @@ describe('Authentication password and primitive validation E2E', () => {
     });
 
     afterAll(async () => {
-        if (!testApp) return;
-        await closeTestApp(testApp, async ({ db }) => {
-            const users = db.getRepository(User);
-            const errors: unknown[] = [];
-            for (const fixture of fixtures) {
-                try {
-                    const existing = await users.findOneBy({ email: fixture.email });
-                    if (existing) {
-                        if (!fixture.id || existing.id !== fixture.id) {
-                            throw new Error('User fixture identity mismatch');
-                        }
-                        await users.delete({ id: fixture.id, email: fixture.email });
-                    }
-                    if (await users.countBy({ email: fixture.email })) {
-                        throw new Error('User fixture cleanup incomplete');
-                    }
-                } catch (error: unknown) {
-                    errors.push(error);
-                }
-            }
-            if (errors.length) {
-                throw new AggregateError(errors, 'Password validation fixture cleanup failed');
-            }
-        });
+        if (testApp) await closeTestApp(testApp);
     });
 
     function context(): TestAppContext {
@@ -63,7 +39,6 @@ describe('Authentication password and primitive validation E2E', () => {
             email: fixture.email,
         });
         if (exists) throw new Error('User fixture email collision');
-        fixtures.push(fixture);
         return fixture;
     }
 
