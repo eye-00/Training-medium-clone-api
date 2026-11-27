@@ -1,0 +1,21 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true,
+    "declaration": false,
+    "incremental": false
+  },
+  "include": [
+    "src/**/*.ts",
+    "test/helpers/**/*.ts",
+    "test/*.e2e-spec.ts",
+    "vitest.config.ts",
+    "vitest.config.e2e.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "test/app.e2e-spec.ts"
+  ]
+}

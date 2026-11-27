@@ -20,7 +20,9 @@
     "test:cov": "vitest run --coverage",
     "test:debug": "vitest --inspect-brk --no-file-parallelism",
     "db:reset:test": "pnpm run build && node dist/scripts/reset-test-db.js",
-    "test:e2e": "node --env-file=.env.test ./node_modules/vitest/vitest.mjs run --config ./vitest.config.e2e.ts"
+    "test:e2e": "node --env-file=.env.e2e ./node_modules/vitest/vitest.mjs run --config ./vitest.config.e2e.ts",
+    "db:migrate:e2e": "node --env-file=.env.e2e test/migrate-e2e.mjs",
+    "typecheck:test": "tsc --project tsconfig.test.json --pretty false"
   },
   "dependencies": {
     "@nestjs/common": "^12.0.1",
@@ -35,10 +37,12 @@
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",
     "dotenv": "^18.0.10",
+    "multer": "^2.5.0",
     "mysql2": "^3.24.6",
     "redis": "^5.12.1",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
+    "sharp": "^0.35.5",
     "typeorm": "^1.1.2",
     "zod": "^4.6.7"
   },
@@ -48,6 +52,7 @@
     "@nestjs/schematics": "^12.0.0",
     "@nestjs/testing": "^12.0.1",
     "@types/express": "^5.0.0",
+    "@types/multer": "^2.3.0",
     "@types/node": "^24.0.0",
     "@types/supertest": "^7.0.0",
     "@vitest/coverage-v8": "^4.1.2",

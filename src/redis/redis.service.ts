@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createClient } from 'redis';
+import { safeSystemErrorCode } from '../logging/safe-system-error.js';
 
 @Injectable()
 export class RedisService implements OnModuleInit, OnModuleDestroy {
@@ -26,7 +27,8 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
             },
         });
         this.client.on('error', (err: Error) => {
-            this.logger.error(`Redis error: ${err.message}`);
+            const code = safeSystemErrorCode(err);
+            this.logger.error(code ? `Redis client error (${code})` : 'Redis client error');
         });
     }
     async onModuleInit(): Promise<void> {

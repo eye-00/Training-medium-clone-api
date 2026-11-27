@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
-// import { ArticlesModule } from './articles/articles.module.js';
+import { ArticlesModule } from './articles/articles.module.js';
 import {
   AcceptLanguageLocaleResolver,
   I18nModule,
@@ -18,6 +18,9 @@ import { ConfigModule, ConfigService } from '@nestjs/config'
 
 import { UsersModule } from './users/users.module.js';
 import { AuthModule } from './auth/auth.module.js';
+import { ProfilesModule } from './profiles/profiles.module.js';
+import { AttachmentsModule } from './attachments/attachments.module.js';
+import { CommentsModule } from './comments/comments.module.js';
 @Module({
   imports: [
     ConfigModule.forRoot({
@@ -57,6 +60,10 @@ import { AuthModule } from './auth/auth.module.js';
     RedisModule,
     UsersModule,
     AuthModule,
+    ProfilesModule,
+    AttachmentsModule,
+    ArticlesModule,
+    CommentsModule,
 
   ],
   controllers: [AppController],
