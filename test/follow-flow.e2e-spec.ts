@@ -1,11 +1,5 @@
-import {
-    type INestApplication,
-    ValidationPipe,
-} from '@nestjs/common';
-import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
-import { DataSource } from 'typeorm';
 import {
     afterAll,
     beforeAll,
@@ -15,16 +9,23 @@ import {
 } from 'vitest';
 
 import { Follow } from '../src/profiles/entities/follow.entity.js';
-import { User } from '../src/users/entities/user.entity.js';
+
+import {
+    createTestApp,
+    closeTestApp,
+    type TestAppContext,
+} from './helpers/test-app.helper.js';
+
+import {
+    cleanupUserFixtures,
+    registerUserFixture,
+    type CreatedUser,
+} from './helpers/user-fixture.helper.js';
 
 describe('Follow / Unfollow E2E', () => {
-    let app: INestApplication | undefined;
-    let databaseVerified = false;
+    let testApp: TestAppContext | undefined;
 
-    const createdUsers: Array<{
-        id: string;
-        email: string;
-    }> = [];
+    const createdUsers: CreatedUser[] = [];
 
     const suffix = randomUUID()
         .replaceAll('-', '')
@@ -42,100 +43,32 @@ describe('Follow / Unfollow E2E', () => {
         username: `follow_b_${suffix}`,
     };
 
+
     beforeAll(async () => {
-        const env = process.env;
-
-        if (
-            env.NODE_ENV !== 'test' ||
-            env.DB_HOST !== '127.0.0.1' ||
-            env.DB_PORT !== '3307' ||
-            env.DB_DATABASE !== 'medium_clone_test' ||
-            env.DB_USERNAME !== 'medium_test_user' ||
-            env.REDIS_URL !== 'redis://127.0.0.1:6380' ||
-            !env.DB_TEST_SERVER_UUID
-        ) {
-            throw new Error('Unsafe E2E environment');
-        }
-
-        const { AppModule } = await import(
-            '../src/app.module.js'
-        );
-
-        const moduleRef = await Test.createTestingModule({
-            imports: [AppModule],
-        }).compile();
-
-        app = moduleRef.createNestApplication();
-
-        app.setGlobalPrefix('api');
-
-        app.useGlobalPipes(
-            new ValidationPipe({
-                whitelist: true,
-                forbidNonWhitelisted: true,
-                transform: true,
-            }),
-        );
-
-        await app.init();
-
-        const dataSource = app.get(DataSource);
-
-        const rows = (await dataSource.query(`
-      SELECT
-        DATABASE() AS db,
-        CURRENT_USER() AS dbUser,
-        @@server_uuid AS serverUuid
-    `)) as Array<{
-            db: string;
-            dbUser: string;
-            serverUuid: string;
-        }>;
-
-        const identity = rows[0];
-
-        if (
-            identity?.db !== 'medium_clone_test' ||
-            !identity.dbUser.startsWith('medium_test_user@') ||
-            identity.serverUuid !== env.DB_TEST_SERVER_UUID
-        ) {
-            throw new Error(
-                'E2E database identity verification failed',
-            );
-        }
-
-        databaseVerified = true;
-    }, 25000);
+        testApp = await createTestApp();
+    });
 
     afterAll(async () => {
-        if (!app) return;
+        if (!testApp) return;
 
-        try {
-            if (databaseVerified) {
-                const usersRepository = app
-                    .get(DataSource)
-                    .getRepository(User);
+        await closeTestApp(
+            testApp,
+            async ({ db }) => {
+                await cleanupUserFixtures(
+                    db,
+                    createdUsers,
+                );
+            },
+        );
+    });
 
-                // The follows table has ON DELETE CASCADE.
-                // Delete only users created by this test.
-                for (const user of createdUsers) {
-                    await usersRepository.delete({
-                        id: user.id,
-                        email: user.email,
-                    });
-                }
-            }
-        } finally {
-            await app.close();
-        }
-    }, 15000);
 
     it('validates follow, unfollow and concurrent requests', async () => {
-        if (!app || !databaseVerified) {
+        if (!testApp) {
             throw new Error('Test app is not ready');
         }
 
-        const server = app.getHttpServer();
+        const { server, db } = testApp;
 
         const followerResponse = await request(server)
             .post('/api/users')
@@ -183,9 +116,7 @@ describe('Follow / Unfollow E2E', () => {
         const unknownFollowUrl =
             `/api/profiles/missing_${suffix}/follow`;
 
-        const followsRepository = app
-            .get(DataSource)
-            .getRepository(Follow);
+        const followsRepository = db.getRepository(Follow);
 
         const countRelationship = () =>
             followsRepository.count({
@@ -326,5 +257,48 @@ describe('Follow / Unfollow E2E', () => {
             .expect(204);
 
         expect(await countRelationship()).toBe(0);
+    }, 30000);
+
+    it('unfollowing one user preserves another user’s follow', async () => {
+        if (!testApp) {
+            throw new Error('Test app is not ready');
+        }
+
+        const { server, db } = testApp;
+        const alice = await registerUserFixture(testApp, createdUsers, { prefix: 'follow_a' });
+        const bob = await registerUserFixture(testApp, createdUsers, { prefix: 'follow_b' });
+        const charlie = await registerUserFixture(testApp, createdUsers, { prefix: 'follow_c' });
+        const followUrl = `/api/profiles/${charlie.username}/follow`;
+        const follows = db.getRepository(Follow);
+        const aliceEdge = { followerId: alice.id, followedId: charlie.id };
+        const bobEdge = { followerId: bob.id, followedId: charlie.id };
+
+        await request(server).post(followUrl)
+            .set('Authorization', alice.authorization).expect(200);
+        await request(server).post(followUrl)
+            .set('Authorization', bob.authorization).expect(200);
+
+        expect(await follows.existsBy(aliceEdge)).toBe(true);
+        expect(await follows.existsBy(bobEdge)).toBe(true);
+        expect(await follows.countBy({ followedId: charlie.id })).toBe(2);
+        const before = await request(server)
+            .get(`/api/profiles/${charlie.username}`).expect(200);
+        expect(before.body.profile.followersCount).toBe(2);
+
+        await request(server).delete(followUrl)
+            .set('Authorization', alice.authorization).expect(204);
+
+        expect(await follows.existsBy(aliceEdge)).toBe(false);
+        expect(await follows.existsBy(bobEdge)).toBe(true);
+        expect(await follows.countBy({ followedId: charlie.id })).toBe(1);
+        const after = await request(server)
+            .get(`/api/profiles/${charlie.username}`).expect(200);
+        expect(after.body.profile.followersCount).toBe(1);
+        const aliceProfile = await request(server)
+            .get(`/api/profiles/${alice.username}`).expect(200);
+        const bobProfile = await request(server)
+            .get(`/api/profiles/${bob.username}`).expect(200);
+        expect(aliceProfile.body.profile.followingCount).toBe(0);
+        expect(bobProfile.body.profile.followingCount).toBe(1);
     }, 30000);
 });

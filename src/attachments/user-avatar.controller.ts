@@ -58,6 +58,7 @@ export class UserAvatarController {
     @ApiBody({
         schema: {
             type: 'object',
+            description: 'JPEG, PNG or WebP; at most 2 MiB and 20 million input pixels. Animated images are rejected.',
             required: ['file'],
             properties: {
                 file: {

@@ -49,11 +49,13 @@ export class JwtAuthGuard implements CanActivate {
 
         const authorization = request.headers.authorization;
 
-        const match = /^Bearer ([^\s]+)$/.exec(
-            authorization ?? '',
-        );
+        const match = typeof authorization === 'string'
+            ? /^Bearer +([^\s]+)$/i.exec(authorization)
+            : null;
 
-        const token = match?.[1];
+        const token = match && match[0] === authorization
+            ? match[1]
+            : undefined;
 
         if (!token) {
             throw new UnauthorizedException(

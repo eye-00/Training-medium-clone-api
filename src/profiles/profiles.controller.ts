@@ -93,10 +93,7 @@ export class ProfilesController {
     @ApiBearerAuth()
     @ApiParam({ name: 'username' })
     @ApiNoContentResponse({
-        description: 'User unfollowed successfully',
-    })
-    @ApiBadRequestResponse({
-        description: 'Cannot unfollow yourself',
+        description: 'User unfollowed successfully; already-unfollowed and self-unfollow requests are no-ops',
     })
     @ApiUnauthorizedResponse({
         description: 'Invalid or missing access token',

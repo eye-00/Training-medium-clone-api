@@ -20,21 +20,21 @@ const trimString = ({ value }: { value: unknown }) =>
     typeof value === 'string' ? value.trim() : value;
 
 export class CreateArticleFieldsDto {
-    @ApiProperty({ example: 'Getting started with NestJS' })
+    @ApiProperty({ example: 'Getting started with NestJS', description: 'After trimming, 1–255 characters and at most 255 Unicode code points.' })
     @Transform(trimString)
     @IsString()
     @MinLength(1)
     @MaxLength(255)
     title!: string;
 
-    @ApiProperty({ example: 'A beginner guide' })
+    @ApiProperty({ example: 'A beginner guide', description: 'After trimming, 1–1000 characters.' })
     @Transform(trimString)
     @IsString()
     @MinLength(1)
     @MaxLength(1000)
     description!: string;
 
-    @ApiProperty({ example: 'NestJS is a Node.js framework...' })
+    @ApiProperty({ example: 'NestJS is a Node.js framework...', description: 'After trimming, 1–100000 characters.' })
     @Transform(trimString)
     @IsString()
     @MinLength(1)
@@ -42,8 +42,11 @@ export class CreateArticleFieldsDto {
     body!: string;
 
     @ApiPropertyOptional({
-        type: [String],
+        type: 'array',
+        maxItems: 10,
+        items: { type: 'string' },
         example: ['nestjs', 'backend'],
+        description: 'Each tag must be 1–100 characters after trimming. Tags are lowercased and deduplicated; each normalized tag must contain at most 100 Unicode code points.',
     })
     @Transform(({ value }: { value: unknown }) =>
         Array.isArray(value)

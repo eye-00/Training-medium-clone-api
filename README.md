@@ -25,11 +25,33 @@
 
 [Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
 
+## Request size limits
+
+JSON and URL-encoded request bodies are limited to 100 KiB (102,400 bytes)
+by the body parser. A larger body receives HTTP 413 before DTO validation.
+The limit applies to the whole request body read by the parser, including JSON
+syntax and other fields; UTF-8 characters can require multiple bytes.
+
+Article `body` has a separate DTO limit of 100,000 characters after trimming.
+Meeting that field limit does not guarantee the whole request fits within
+100 KiB. Multipart avatar uploads use separate limits: one file of at most
+2 MiB, with additional image validation.
+
 ## Project setup
 
 ```bash
 $ pnpm install
 ```
+
+Copy `.env.example` to `.env` and configure the MySQL connection, `REDIS_URL`,
+and `JWT_SECRET` for the intended environment. `JWT_SECRET` must contain at
+least 32 characters, have no surrounding whitespace, and differ from the
+example placeholders. Use a securely generated secret and keep it private;
+the example value is not accepted at startup.
+
+Requests use the `/api` prefix. DTO validation transforms supported inputs and
+rejects unknown properties. Malformed JSON receives HTTP 400 with the message
+`Invalid JSON payload`; oversized parsed bodies receive HTTP 413.
 
 ## Compile and run the project
 
@@ -55,7 +77,56 @@ $ pnpm run test:e2e
 
 # test coverage
 $ pnpm run test:cov
+
+# static checks
+$ pnpm run typecheck:test
+$ pnpm run lint
 ```
+
+E2E tests load `.env.test` and require a separately provisioned test schema and
+Redis instance. The E2E environment guard requires `NODE_ENV=test`, MySQL at
+`127.0.0.1:3307` with database `medium_clone_test` and user `medium_test_user`,
+and `REDIS_URL=redis://127.0.0.1:6380/1`. Set `DB_TEST_SERVER_UUID` to the
+expected test MySQL server UUID, alongside the required database password and
+test JWT secret. The helper checks the connected database, account and server
+UUID before returning a test application and again before suite cleanup.
+
+These checks do not provision isolated services or verify the identity of the
+Redis server; a matching address alone does not establish isolation. Configure
+dedicated test services and a prepared schema before running E2E tests. App
+module initialization opens connections before the live database identity check;
+automatic schema synchronization and migration execution are disabled. Cleanup
+is scoped to suite fixtures, can fail or leave data behind, and is not a
+substitute for disposable infrastructure. Do not point these settings at data
+you need to retain.
+
+The full E2E command includes article create, update, tags and concurrency
+suites whose tag cleanup fails closed when ownership is uncertain. These suites
+can leave test tags behind and fail teardown; do not run the full suite on a
+shared database until their tag ownership and cleanup are addressed.
+
+## Authentication and deployment
+
+Access tokens use HS256 and expire after 15 minutes. Authenticated requests
+check token revocation in Redis and fail with HTTP 503 if that check is
+unavailable. Losing a blacklist entry through a Redis restart or eviction can
+allow a previously revoked token to work again until it expires; plan Redis
+persistence and eviction accordingly. The application does not currently
+provide login or registration rate limiting; assess protections at the
+deployment boundary.
+
+Passwords are limited to 72 UTF-8 bytes for bcrypt. An over-limit registration
+receives HTTP 400; login rejects it as invalid credentials with HTTP 401.
+
+## Avatar storage
+
+An avatar upload writes the new file before updating its database metadata. If
+the transaction fails before its callback completes, the new file is removed
+on a best-effort basis. If the callback completes but the transaction reports an
+error, the commit outcome may be unknown; both old and new files are retained
+to avoid deleting a file that may be referenced by a committed transaction.
+This can leave an orphan file if the transaction actually rolled back, and
+requires a separate, careful reconciliation process.
 
 ## Deployment
 

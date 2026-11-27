@@ -20,7 +20,7 @@ const trimString = ({ value }: { value: unknown }) =>
     typeof value === 'string' ? value.trim() : value;
 
 export class UpdateArticleFieldsDto {
-    @ApiPropertyOptional()
+    @ApiPropertyOptional({ description: 'After trimming, 1–255 characters and at most 255 Unicode code points.' })
     @Transform(trimString)
     @ValidateIf((_object, value: unknown) => value !== undefined)
     @IsString()
@@ -28,7 +28,7 @@ export class UpdateArticleFieldsDto {
     @MaxLength(255)
     title?: string;
 
-    @ApiPropertyOptional()
+    @ApiPropertyOptional({ description: 'After trimming, 1–1000 characters.' })
     @Transform(trimString)
     @ValidateIf((_object, value: unknown) => value !== undefined)
     @IsString()
@@ -36,7 +36,7 @@ export class UpdateArticleFieldsDto {
     @MaxLength(1000)
     description?: string;
 
-    @ApiPropertyOptional()
+    @ApiPropertyOptional({ description: 'After trimming, 1–100000 characters.' })
     @Transform(trimString)
     @ValidateIf((_object, value: unknown) => value !== undefined)
     @IsString()
@@ -44,7 +44,10 @@ export class UpdateArticleFieldsDto {
     @MaxLength(100000)
     body?: string;
 
-    @ApiPropertyOptional({ type: [String] })
+    @ApiPropertyOptional({
+        type: 'array', maxItems: 10, items: { type: 'string' },
+        description: 'Each tag must be 1–100 characters after trimming. Tags are lowercased and deduplicated; each normalized tag must contain at most 100 Unicode code points. An empty array removes all tags.',
+    })
     @Transform(({ value }: { value: unknown }) =>
         Array.isArray(value)
             ? value.map((item: unknown) =>

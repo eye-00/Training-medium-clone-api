@@ -1,12 +1,6 @@
-
-import {
-    type INestApplication,
-    ValidationPipe,
-} from '@nestjs/common';
-import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
-import { DataSource } from 'typeorm';
+
 import {
     afterAll,
     beforeAll,
@@ -15,10 +9,18 @@ import {
     it,
 } from 'vitest';
 
-import { User } from '../src/users/entities/user.entity.js';
+import {
+    createTestApp,
+    closeTestApp,
+    type TestAppContext,
+} from './helpers/test-app.helper.js';
+
+import {
+    cleanupUserFixtures,
+} from './helpers/user-fixture.helper.js';
 
 describe('Authentication E2E', () => {
-    let app: INestApplication | undefined;
+    let testApp: TestAppContext | undefined;
     let createdUserId: string | undefined;
 
     const suffix = randomUUID().replaceAll('-', '');
@@ -27,93 +29,31 @@ describe('Authentication E2E', () => {
     const password = 'ExamplePass123!';
 
     beforeAll(async () => {
-        const env = process.env;
-
-        if (
-            env.NODE_ENV !== 'test' ||
-            env.DB_HOST !== '127.0.0.1' ||
-            env.DB_PORT !== '3307' ||
-            env.DB_DATABASE !== 'medium_clone_test' ||
-            env.DB_USERNAME !== 'medium_test_user' ||
-            env.REDIS_URL !== 'redis://127.0.0.1:6380' ||
-            !env.DB_TEST_SERVER_UUID
-        ) {
-            throw new Error(
-                'Unsafe E2E environment: expected isolated test services',
-            );
-        }
-
-        // Import the application only after checking the environment.
-        const { AppModule } = await import('../src/app.module.js');
-
-        const moduleRef = await Test.createTestingModule({
-            imports: [AppModule],
-        }).compile();
-
-        app = moduleRef.createNestApplication();
-
-        app.setGlobalPrefix('api');
-
-        app.useGlobalPipes(
-            new ValidationPipe({
-                whitelist: true,
-                forbidNonWhitelisted: true,
-                transform: true,
-            }),
-        );
-
-        await app.init();
-
-        const dataSource = app.get(DataSource);
-
-        const rows = (await dataSource.query(`
-      SELECT
-        DATABASE() AS db,
-        CURRENT_USER() AS dbUser,
-        @@server_uuid AS serverUuid
-    `)) as Array<{
-            db: string;
-            dbUser: string;
-            serverUuid: string;
-        }>;
-
-        const identity = rows[0];
-
-        if (
-            identity?.db !== 'medium_clone_test' ||
-            !identity.dbUser.startsWith('medium_test_user@') ||
-            identity.serverUuid !== env.DB_TEST_SERVER_UUID
-        ) {
-            throw new Error(
-                'E2E database identity verification failed',
-            );
-        }
+        testApp = await createTestApp();
     });
 
     afterAll(async () => {
-        if (!app) return;
+        if (!testApp) return;
 
-        try {
-            if (createdUserId) {
-                await app
-                    .get(DataSource)
-                    .getRepository(User)
-                    .delete({
-                        id: createdUserId,
-                        email,
-                    });
-            }
-        } finally {
-            await app.close();
-        }
+        await closeTestApp(
+            testApp,
+            async ({ db }) => {
+                if (createdUserId) {
+                    await cleanupUserFixtures(
+                        db,
+                        [{ id: createdUserId, email }],
+                    );
+                }
+            },
+        );
     });
 
     it('registers, logs in, reads user and logs out', async () => {
-        if (!app) {
+        if (!testApp) {
             throw new Error('Test application was not initialized');
         }
 
-        const server = app.getHttpServer();
+        const { server } = testApp;
 
 
 

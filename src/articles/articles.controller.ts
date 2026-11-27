@@ -23,6 +23,7 @@ import {
     ApiNotFoundResponse,
     ApiForbiddenResponse,
     ApiNoContentResponse,
+    ApiServiceUnavailableResponse,
 } from '@nestjs/swagger';
 
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
@@ -38,6 +39,7 @@ import { ListArticlesQueryDto } from './dto/list-articles-query.dto.js';
 import { ArticlesResponseDto } from './dto/articles-response.dto.js';
 import { FeedArticlesQueryDto } from './dto/feed-articles-query.dto.js';
 @ApiTags('Articles')
+@ApiServiceUnavailableResponse({ description: 'Token revocation check is unavailable when authentication is required or supplied.' })
 @Controller('articles')
 export class ArticlesController {
     constructor(

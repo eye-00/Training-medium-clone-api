@@ -20,7 +20,8 @@
     "test:cov": "vitest run --coverage",
     "test:debug": "vitest --inspect-brk --no-file-parallelism",
     "db:reset:test": "pnpm run build && node dist/scripts/reset-test-db.js",
-    "test:e2e": "node --env-file=.env.test ./node_modules/vitest/vitest.mjs run --config ./vitest.config.e2e.ts"
+    "test:e2e": "node --env-file=.env.test ./node_modules/vitest/vitest.mjs run --config ./vitest.config.e2e.ts",
+    "typecheck:test": "tsc --project tsconfig.test.json --pretty false"
   },
   "dependencies": {
     "@nestjs/common": "^12.0.1",

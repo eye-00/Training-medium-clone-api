@@ -1,12 +1,8 @@
-
-import {
-  type INestApplication,
-  ValidationPipe,
-} from '@nestjs/common';
-import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
-import { DataSource } from 'typeorm';
+
+import { User } from '../src/users/entities/user.entity.js';
+
 import {
   afterAll,
   beforeAll,
@@ -15,15 +11,22 @@ import {
   it,
 } from 'vitest';
 
-import { User } from '../src/users/entities/user.entity.js';
+import {
+  createTestApp,
+  closeTestApp,
+  type TestAppContext,
+} from './helpers/test-app.helper.js';
+
+import {
+  cleanupUserFixtures,
+  registerUserFixture,
+  type CreatedUser,
+} from './helpers/user-fixture.helper.js';
 
 describe('Update Profile E2E', () => {
-  let app: INestApplication | undefined;
+  let testApp: TestAppContext | undefined;
 
-  const createdUsers: Array<{
-    id: string;
-    email: string;
-  }> = [];
+  const createdUsers: CreatedUser[] = [];
 
   const suffix = randomUUID().replaceAll('-', '');
 
@@ -34,95 +37,29 @@ describe('Update Profile E2E', () => {
   const password = 'ExamplePass123!';
 
   beforeAll(async () => {
-    const env = process.env;
-
-    // Check test environment before loading AppModule
-    if (
-      env.NODE_ENV !== 'test' ||
-      env.DB_HOST !== '127.0.0.1' ||
-      env.DB_PORT !== '3307' ||
-      env.DB_DATABASE !== 'medium_clone_test' ||
-      env.DB_USERNAME !== 'medium_test_user' ||
-      env.REDIS_URL !== 'redis://127.0.0.1:6380' ||
-      !env.DB_TEST_SERVER_UUID
-    ) {
-      throw new Error('Unsafe E2E environment');
-    }
-
-    const { AppModule } = await import(
-      '../src/app.module.js'
-    );
-
-    const moduleRef = await Test.createTestingModule({
-      imports: [AppModule],
-    }).compile();
-
-    app = moduleRef.createNestApplication();
-
-    app.setGlobalPrefix('api');
-
-    app.useGlobalPipes(
-      new ValidationPipe({
-        whitelist: true,
-        forbidNonWhitelisted: true,
-        transform: true,
-      }),
-    );
-
-    await app.init();
-
-    // Verify the actual database connection
-    const dataSource = app.get(DataSource);
-
-    const rows = (await dataSource.query(`
-      SELECT
-        DATABASE() AS db,
-        CURRENT_USER() AS dbUser,
-        @@server_uuid AS serverUuid
-    `)) as Array<{
-      db: string;
-      dbUser: string;
-      serverUuid: string;
-    }>;
-
-    const identity = rows[0];
-
-    if (
-      identity?.db !== 'medium_clone_test' ||
-      !identity.dbUser.startsWith('medium_test_user@') ||
-      identity.serverUuid !== env.DB_TEST_SERVER_UUID
-    ) {
-      throw new Error(
-        'E2E database identity verification failed',
-      );
-    }
+    testApp = await createTestApp();
   });
 
   afterAll(async () => {
-    if (!app) return;
+    if (!testApp) return;
 
-    try {
-      const repository = app
-        .get(DataSource)
-        .getRepository(User);
-
-      for (const user of createdUsers) {
-        await repository.delete({
-          id: user.id,
-          email: user.email,
-        });
-      }
-    } finally {
-      await app.close();
-    }
+    await closeTestApp(
+      testApp,
+      async ({ db }) => {
+        await cleanupUserFixtures(
+          db,
+          createdUsers,
+        );
+      },
+    );
   });
 
   it('updates profile with validation and authorization', async () => {
-    if (!app) {
+    if (!testApp) {
       throw new Error('Test app not initialized');
     }
 
-    const server = app.getHttpServer();
+    const { server } = testApp;
 
     // Register the first user
     const register = await request(server)
@@ -262,4 +199,62 @@ describe('Update Profile E2E', () => {
       .send({ email, password })
       .expect(200);
   });
+
+  it('updates only the authenticated user and leaves another user unchanged', async () => {
+    if (!testApp) {
+      throw new Error('Test app not initialized');
+    }
+
+    const userA = await registerUserFixture(testApp, createdUsers, { prefix: 'profile_a' });
+    const userB = await registerUserFixture(testApp, createdUsers, { prefix: 'profile_b' });
+    const users = testApp.db.getRepository(User);
+    const loadUser = (id: string) => users.findOneByOrFail({ id });
+    const beforeB = await loadUser(userB.id);
+
+    const response = await request(testApp.server)
+      .put('/api/user')
+      .set('Authorization', userA.authorization)
+      .send({ bio: 'Updated only for user A' })
+      .expect(200);
+
+    expect(response.body.user.id).toBe(userA.id);
+    expect(response.body.user.bio).toBe('Updated only for user A');
+    expect((await loadUser(userA.id)).bio).toBe('Updated only for user A');
+    expect(await loadUser(userB.id)).toEqual(beforeB);
+  });
+
+  it.each(['id', 'email', 'passwordHash', 'image'] as const)(
+    'rejects a forbidden %s alongside a valid bio without changing either user',
+    async (field) => {
+      if (!testApp) {
+        throw new Error('Test app not initialized');
+      }
+
+      const userA = await registerUserFixture(testApp, createdUsers, { prefix: 'protect_a' });
+      const userB = await registerUserFixture(testApp, createdUsers, { prefix: 'protect_b' });
+      const users = testApp.db.getRepository(User);
+      const loadUser = (id: string) => users.createQueryBuilder('user')
+        .addSelect('user.passwordHash')
+        .where('user.id = :id', { id })
+        .getOneOrFail();
+      const beforeA = JSON.stringify(await loadUser(userA.id));
+      const beforeB = JSON.stringify(await loadUser(userB.id));
+      const forbiddenValues = {
+        id: userB.id,
+        email: `forbidden-${randomUUID()}@example.com`,
+        passwordHash: 'forged-password-hash',
+        image: '/api/avatars/forged',
+      };
+
+      await request(testApp.server)
+        .put('/api/user')
+        .set('Authorization', userA.authorization)
+        .send({ bio: 'A valid update that must not be applied', [field]: forbiddenValues[field] })
+        .expect(400);
+
+      // Compare as booleans so assertion failures never print password hashes.
+      expect(JSON.stringify(await loadUser(userA.id)) === beforeA).toBe(true);
+      expect(JSON.stringify(await loadUser(userB.id)) === beforeB).toBe(true);
+    },
+  );
 });

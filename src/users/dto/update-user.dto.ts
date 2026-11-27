@@ -16,8 +16,7 @@ import { ApiPropertyOptional } from '@nestjs/swagger';
 export class UpdateUserDto {
     @ApiPropertyOptional({
         example: 'new_username',
-        minLength: 3,
-        maxLength: 100,
+        description: 'After trimming, must satisfy the 3–100 character validator and contain at most 100 Unicode code points.',
     })
     @Transform(({ value }: TransformFnParams) =>
         typeof value === 'string'
@@ -33,7 +32,7 @@ export class UpdateUserDto {
     @ApiPropertyOptional({
         example: 'Backend developer learning NestJS',
         nullable: true,
-        maxLength: 500,
+        description: 'After trimming, at most 500 characters; null clears the bio.',
     })
     @Transform(({ value }: TransformFnParams) =>
         typeof value === 'string'

@@ -20,7 +20,7 @@ const parseInteger = ({ value }: { value: unknown }) =>
         : value;
 
 export class ListArticlesQueryDto {
-    @ApiPropertyOptional({ example: 'nestjs' })
+    @ApiPropertyOptional({ example: 'nestjs', description: 'After trimming, 1–100 characters.' })
     @Transform(trimString)
     @ValidateIf((_object, value: unknown) => value !== undefined)
     @IsString()
@@ -28,7 +28,7 @@ export class ListArticlesQueryDto {
     @MaxLength(100)
     tag?: string;
 
-    @ApiPropertyOptional({ example: 'developer' })
+    @ApiPropertyOptional({ example: 'developer', description: 'After trimming, 1–100 characters.' })
     @Transform(trimString)
     @ValidateIf((_object, value: unknown) => value !== undefined)
     @IsString()
@@ -36,7 +36,7 @@ export class ListArticlesQueryDto {
     @MaxLength(100)
     author?: string;
 
-    @ApiPropertyOptional({ example: 'developer' })
+    @ApiPropertyOptional({ example: 'developer', description: 'After trimming, 1–100 characters.' })
     @Transform(trimString)
     @ValidateIf((_object, value: unknown) => value !== undefined)
     @IsString()

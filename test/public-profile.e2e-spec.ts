@@ -1,11 +1,5 @@
-import {
-    type INestApplication,
-    ValidationPipe,
-} from '@nestjs/common';
-import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
-import { DataSource } from 'typeorm';
 import {
     afterAll,
     beforeAll,
@@ -14,17 +8,23 @@ import {
     it,
 } from 'vitest';
 
-import { User } from '../src/users/entities/user.entity.js';
 import { Follow } from '../src/profiles/entities/follow.entity.js';
 
-describe('Public Profile E2E', () => {
-    let app: INestApplication | undefined;
-    let databaseVerified = false;
+import {
+    createTestApp,
+    closeTestApp,
+    type TestAppContext,
+} from './helpers/test-app.helper.js';
 
-    const createdUsers: Array<{
-        id: string;
-        email: string;
-    }> = [];
+import {
+    cleanupUserFixtures,
+    type CreatedUser,
+} from './helpers/user-fixture.helper.js';
+
+describe('Public Profile E2E', () => {
+    let testApp: TestAppContext | undefined;
+
+    const createdUsers: CreatedUser[] = [];
 
     const suffix = randomUUID().replaceAll('-', '').slice(0, 20);
     const password = 'ExamplePass123!';
@@ -44,102 +44,32 @@ describe('Public Profile E2E', () => {
         },
     ];
 
+
     beforeAll(async () => {
-        const env = process.env;
-
-        // Check the environment before importing AppModule.
-        if (
-            env.NODE_ENV !== 'test' ||
-            env.DB_HOST !== '127.0.0.1' ||
-            env.DB_PORT !== '3307' ||
-            env.DB_DATABASE !== 'medium_clone_test' ||
-            env.DB_USERNAME !== 'medium_test_user' ||
-            env.REDIS_URL !== 'redis://127.0.0.1:6380' ||
-            !env.DB_TEST_SERVER_UUID
-        ) {
-            throw new Error(
-                'Unsafe E2E environment: expected isolated test services',
-            );
-        }
-
-        const { AppModule } = await import(
-            '../src/app.module.js'
-        );
-
-        const moduleRef = await Test.createTestingModule({
-            imports: [AppModule],
-        }).compile();
-
-        app = moduleRef.createNestApplication();
-
-        app.setGlobalPrefix('api');
-
-        app.useGlobalPipes(
-            new ValidationPipe({
-                whitelist: true,
-                forbidNonWhitelisted: true,
-                transform: true,
-            }),
-        );
-
-        await app.init();
-
-        const dataSource = app.get(DataSource);
-
-        const rows = (await dataSource.query(`
-      SELECT
-        DATABASE() AS db,
-        CURRENT_USER() AS dbUser,
-        @@server_uuid AS serverUuid
-    `)) as Array<{
-            db: string;
-            dbUser: string;
-            serverUuid: string;
-        }>;
-
-        const identity = rows[0];
-
-        if (
-            identity?.db !== 'medium_clone_test' ||
-            !identity.dbUser.startsWith('medium_test_user@') ||
-            identity.serverUuid !== env.DB_TEST_SERVER_UUID
-        ) {
-            throw new Error(
-                'E2E database identity verification failed',
-            );
-        }
-
-        databaseVerified = true;
-    }, 20000);
-
-    afterAll(async () => {
-        if (!app) return;
-
-        try {
-            if (databaseVerified) {
-                const repository = app
-                    .get(DataSource)
-                    .getRepository(User);
-
-                // Follow rows are removed by ON DELETE CASCADE.
-                for (const user of createdUsers) {
-                    await repository.delete({
-                        id: user.id,
-                        email: user.email,
-                    });
-                }
-            }
-        } finally {
-            await app.close();
-        }
+        testApp = await createTestApp();
     });
 
+    afterAll(async () => {
+        if (!testApp) return;
+
+        await closeTestApp(
+            testApp,
+            async ({ db }) => {
+                await cleanupUserFixtures(
+                    db,
+                    createdUsers,
+                );
+            },
+        );
+    });
+
+
     it('returns public profiles and correct follow counts', async () => {
-        if (!app || !databaseVerified) {
+        if (!testApp) {
             throw new Error('Test application is not ready');
         }
 
-        const server = app.getHttpServer();
+        const { server, db } = testApp;
         const ids: string[] = [];
 
         // Register three isolated test users.
@@ -170,9 +100,7 @@ describe('Public Profile E2E', () => {
         }
 
         // B follows A, C follows A, A follows B.
-        const followsRepository = app
-            .get(DataSource)
-            .getRepository(Follow);
+        const followsRepository = db.getRepository(Follow);
 
         await followsRepository.insert([
             { followerId: userB, followedId: userA },

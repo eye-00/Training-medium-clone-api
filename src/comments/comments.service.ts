@@ -5,7 +5,9 @@ import {
     InternalServerErrorException,
     ForbiddenException,
 } from '@nestjs/common';
-import { DataSource, In, QueryFailedError } from 'typeorm';
+import { DataSource, In } from 'typeorm';
+
+import { retryOnDeadlock } from '../database/utils/retry-on-deadlock.js';
 import { Article } from '../articles/entities/article.entity.js';
 import { User } from '../users/entities/user.entity.js';
 import { Comment } from './entities/comment.entity.js';
@@ -36,7 +38,7 @@ export class CommentsService {
         userId: string,
         dto: CreateCommentDto,
     ): Promise<CommentResponseDto> {
-        return this.retryOnDeadlock(() => this.dataSource.transaction(
+        return retryOnDeadlock(() => this.dataSource.transaction(
             'READ COMMITTED',
             async (manager) => {
                 const article = await manager
@@ -195,7 +197,7 @@ export class CommentsService {
         commentId: number,
         userId: string,
     ): Promise<void> {
-        await this.retryOnDeadlock(() => this.dataSource.transaction(
+        await retryOnDeadlock(() => this.dataSource.transaction(
             'READ COMMITTED',
             async (manager) => {
                 const article = await manager
@@ -265,42 +267,6 @@ export class CommentsService {
                 following,
             },
         };
-    }
-
-    private async retryOnDeadlock<T>(
-        operation: () => Promise<T>,
-    ): Promise<T> {
-        const maxAttempts = 3;
-
-        for (let attempt = 1; ; attempt++) {
-            try {
-                return await operation();
-            } catch (error: unknown) {
-                const driverError =
-                    error instanceof QueryFailedError
-                        ? (error.driverError as {
-                            code?: string;
-                            errno?: number;
-                        })
-                        : null;
-
-                const isDeadlock =
-                    driverError?.code === 'ER_LOCK_DEADLOCK' ||
-                    driverError?.errno === 1213;
-
-                if (!isDeadlock || attempt >= maxAttempts) {
-                    throw error;
-                }
-
-                const delayMs =
-                    attempt * 30 +
-                    Math.floor(Math.random() * 30);
-
-                await new Promise<void>((resolve) => {
-                    setTimeout(resolve, delayMs);
-                });
-            }
-        }
     }
 
 }

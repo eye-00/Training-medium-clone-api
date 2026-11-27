@@ -1,184 +1,156 @@
-import {
-  type INestApplication,
-  ValidationPipe,
-} from '@nestjs/common';
-import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
-import { DataSource, In } from 'typeorm';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { In } from 'typeorm';
 
-import { User } from '../src/users/entities/user.entity.js';
+import {
+    afterAll,
+    beforeAll,
+    describe,
+    expect,
+    it,
+} from 'vitest';
+
 import { Article } from '../src/articles/entities/article.entity.js';
 import { Tag } from '../src/articles/entities/tag.entity.js';
 import { ArticleTag } from '../src/articles/entities/article-tag.entity.js';
 
+import {
+    createTestApp,
+    closeTestApp,
+    type TestAppContext,
+} from './helpers/test-app.helper.js';
+
+import {
+    registerUserFixture,
+    cleanupUserFixtures,
+    type CreatedUser,
+} from './helpers/user-fixture.helper.js';
+
+import {
+    cleanupTagFixtures,
+    makeUniqueTag,
+} from './helpers/article-fixture.helper.js';
+
 describe('Article Tags E2E', () => {
-  let app: INestApplication | undefined;
-  let databaseVerified = false;
+    let testApp: TestAppContext | undefined;
 
-  const password = 'ExamplePass123!';
-  const createdUsers: Array<{ id: string; email: string }> = [];
-  const createdTagNames = new Set<string>();
+    const createdUsers: CreatedUser[] = [];
+    const createdTagNames = new Set<string>();
 
-  function uniquePart(): string {
-    return randomUUID().replaceAll('-', '').slice(0, 16);
-  }
+    beforeAll(async () => {
+        testApp = await createTestApp({
+            listen: true,
+        });
+    });
 
-  function makeTag(label: string): string {
-    const name = `e2e_${label}_${uniquePart()}`;
-    createdTagNames.add(name);
-    return name;
-  }
+    afterAll(async () => {
+        if (!testApp) return;
 
-  function makeAccentPair(): [string, string] {
-    const suffix = uniquePart();
-    const plain = `e2e_cafe_${suffix}`;
-    const accented = `e2e_café_${suffix}`;
-    createdTagNames.add(plain);
-    createdTagNames.add(accented);
-    return [plain, accented];
-  }
+        await closeTestApp(
+            testApp,
+            async ({ db }) => {
+                await cleanupUserFixtures(
+                    db,
+                    createdUsers,
+                );
 
-  function context() {
-    if (!app || !databaseVerified) {
-      throw new Error('Test app is not ready');
-    }
-    return { server: app.getHttpServer(), db: app.get(DataSource) };
-  }
+                await cleanupTagFixtures(
+                    db,
+                    createdTagNames,
+                );
+            },
+        );
+    }, 30000);
 
-  async function registerUser() {
-    const { server } = context();
-    const username = `tags_${uniquePart()}`;
-    const email = `${username}@example.com`;
-
-    const registration = await request(server)
-      .post('/api/users')
-      .send({ email, username, password })
-      .expect(201);
-
-    const id = registration.body.user.id as string;
-    createdUsers.push({ id, email });
-
-    const login = await request(server)
-      .post('/api/users/login')
-      .send({ email, password })
-      .expect(200);
-
-    return {
-      id,
-      authorization: `Bearer ${login.body.accessToken as string}`,
-    };
-  }
-
-  async function createArticle(
-    authorization: string,
-    tagList: string[],
-  ) {
-    const { server, db } = context();
-    const title = `Article Tags ${uniquePart()}`;
-
-    const response = await request(server)
-      .post('/api/articles')
-      .set('Authorization', authorization)
-      .send({
-        article: {
-          title,
-          description: `Description for ${title}`,
-          body: `Body for ${title}`,
-          tagList,
-        },
-      })
-      .expect(201);
-
-    const slug = response.body.article.slug as string;
-    const saved = await db.getRepository(Article).findOneByOrFail({ slug });
-    return { response, saved };
-  }
-
-  async function getActiveOwnTags(names: string[]): Promise<string[]> {
-    const { server } = context();
-    const result = await request(server).get('/api/tags').expect(200);
-    expect(Array.isArray(result.body.tags)).toBe(true);
-    return (result.body.tags as string[]).filter((name) =>
-      names.includes(name),
-    );
-  }
-
-  beforeAll(async () => {
-    const env = process.env;
-    if (
-      env.NODE_ENV !== 'test' ||
-      env.DB_HOST !== '127.0.0.1' ||
-      env.DB_PORT !== '3307' ||
-      env.DB_DATABASE !== 'medium_clone_test' ||
-      env.DB_USERNAME !== 'medium_test_user' ||
-      env.REDIS_URL !== 'redis://127.0.0.1:6380' ||
-      !env.DB_TEST_SERVER_UUID
-    ) {
-      throw new Error('Unsafe E2E environment');
-    }
-
-    const { AppModule } = await import('../src/app.module.js');
-    const moduleRef = await Test.createTestingModule({
-      imports: [AppModule],
-    }).compile();
-
-    app = moduleRef.createNestApplication();
-    app.setGlobalPrefix('api');
-    app.useGlobalPipes(
-      new ValidationPipe({
-        whitelist: true,
-        forbidNonWhitelisted: true,
-        transform: true,
-      }),
-    );
-    await app.listen(0, '127.0.0.1');
-
-    const rows = (await app.get(DataSource).query(`
-      SELECT DATABASE() AS db,
-             CURRENT_USER() AS dbUser,
-             @@server_uuid AS serverUuid
-    `)) as Array<{
-      db: string;
-      dbUser: string;
-      serverUuid: string;
-    }>;
-
-    const identity = rows[0];
-    if (
-      identity?.db !== 'medium_clone_test' ||
-      !identity.dbUser.startsWith('medium_test_user@') ||
-      identity.serverUuid !== env.DB_TEST_SERVER_UUID
-    ) {
-      throw new Error('E2E database identity verification failed');
-    }
-    databaseVerified = true;
-  }, 25000);
-
-  afterAll(async () => {
-    if (!app) return;
-    try {
-      if (databaseVerified) {
-        const db = app.get(DataSource);
-        // Each test owns a separate user and uniquely named tags.
-        // Cascading deletion removes only those users' articles/links.
-        for (const user of createdUsers) {
-          await db.getRepository(User).delete({
-            id: user.id,
-            email: user.email,
-          });
+    function context(): TestAppContext {
+        if (!testApp) {
+            throw new Error('Test app is not ready');
         }
-        if (createdTagNames.size > 0) {
-          await db.getRepository(Tag).delete({
-            name: In([...createdTagNames]),
-          });
-        }
-      }
-    } finally {
-      await app.close();
+
+        return testApp;
     }
-  }, 30000);
+
+    function uniquePart(): string {
+        return randomUUID()
+            .replaceAll('-', '')
+            .slice(0, 16);
+    }
+
+    function makeTag(label: string): string {
+        return makeUniqueTag(
+            createdTagNames,
+            `e2e_${label}`,
+        );
+    }
+
+    function makeAccentPair(): [string, string] {
+        const suffix = uniquePart();
+
+        const plain = `e2e_cafe_${suffix}`;
+        const accented = `e2e_café_${suffix}`;
+
+        createdTagNames.add(plain);
+        createdTagNames.add(accented);
+
+        return [plain, accented];
+    }
+
+    function registerUser() {
+        return registerUserFixture(
+            context(),
+            createdUsers,
+            { prefix: 'tags' },
+        );
+    }
+
+    async function createArticle(
+        authorization: string,
+        tagList: string[],
+    ) {
+        const { server, db } = context();
+
+        const title = `Article Tags ${uniquePart()}`;
+
+        const response = await request(server)
+            .post('/api/articles')
+            .set('Authorization', authorization)
+            .send({
+                article: {
+                    title,
+                    description: `Description for ${title}`,
+                    body: `Body for ${title}`,
+                    tagList,
+                },
+            })
+            .expect(201);
+
+        const slug = response.body.article.slug as string;
+
+        const saved = await db
+            .getRepository(Article)
+            .findOneByOrFail({ slug });
+
+        return {
+            response,
+            saved,
+        };
+    }
+
+    async function getActiveOwnTags(
+        names: string[],
+    ): Promise<string[]> {
+        const { server } = context();
+
+        const result = await request(server)
+            .get('/api/tags')
+            .expect(200);
+
+        expect(Array.isArray(result.body.tags))
+            .toBe(true);
+
+        return (result.body.tags as string[])
+            .filter(name => names.includes(name));
+    }
 
   it('exposes only active, unique tags on the public endpoint', async () => {
     const { db } = context();

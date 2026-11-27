@@ -4,6 +4,7 @@ import {
     NotFoundException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
+import { safeSystemErrorCode } from '../logging/safe-system-error.js';
 import { DataSource } from 'typeorm';
 
 import { User } from '../users/entities/user.entity.js';
@@ -43,6 +44,7 @@ export class AvatarService {
         );
 
         let result: AvatarUpdateResult;
+        let transactionCallbackCompleted = false;
 
         try {
             // Step 2: Update metadata and user image atomically.
@@ -117,18 +119,22 @@ export class AvatarService {
                         { image: attachmentId },
                     );
 
-                    return {
+                    const updateResult = {
                         attachmentId,
                         oldStorageKey,
                     };
+                    transactionCallbackCompleted = true;
+                    return updateResult;
                 },
             );
         } catch (error: unknown) {
-            // Database transaction failed.
-            // Remove the newly written file.
-            await this.deleteFileBestEffort(
-                stored.storageKey,
-            );
+            // Once the callback completes, commit may have succeeded even if
+            // its acknowledgement was lost. Keep the file in that case.
+            if (!transactionCallbackCompleted) {
+                await this.deleteFileBestEffort(
+                    stored.storageKey,
+                );
+            }
 
             throw error;
         }
@@ -252,9 +258,10 @@ export class AvatarService {
         try {
             await this.storage.deleteAvatar(storageKey);
         } catch (error: unknown) {
-            this.logger.error(
-                `Failed to clean up avatar ${storageKey}: ${String(error)}`,
-            );
+            const code = safeSystemErrorCode(error);
+            this.logger.error(code
+                ? `Avatar file cleanup failed (${code})`
+                : 'Avatar file cleanup failed');
         }
     }
 }

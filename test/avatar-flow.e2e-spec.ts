@@ -1,154 +1,288 @@
-
-import {
-    type INestApplication,
-    ValidationPipe,
-} from '@nestjs/common';
-import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
 import sharp from 'sharp';
-import { DataSource } from 'typeorm';
+
 import {
     afterAll,
     beforeAll,
     describe,
     expect,
     it,
+    vi,
 } from 'vitest';
 
 import { Attachment } from '../src/attachments/entities/attachment.entity.js';
 import { AvatarStorageService } from '../src/attachments/avatar-storage.service.js';
 import { User } from '../src/users/entities/user.entity.js';
 
+import {
+    createTestApp,
+    closeTestApp,
+    type TestAppContext,
+} from './helpers/test-app.helper.js';
+import {
+    registerUserFixture,
+    type CreatedUser,
+} from './helpers/user-fixture.helper.js';
+
+import {
+    mkdtemp,
+    readdir,
+    rm,
+} from 'node:fs/promises';
+
+import { tmpdir } from 'node:os';
+import * as path from 'node:path';
 describe('Avatar E2E', () => {
-    let app: INestApplication | undefined;
-    let databaseVerified = false;
+    let testApp: TestAppContext | undefined;
     let createdUserId: string | undefined;
+    const additionalUsers: CreatedUser[] = [];
 
-    const trackedStorageKeys = new Set<string>();
+    let temporaryRoot: string | undefined;
 
-    const suffix = randomUUID().replaceAll('-', '').slice(0, 16);
+    const suffix = randomUUID()
+        .replaceAll('-', '')
+        .slice(0, 16);
+
     const email = `e2e-avatar-${suffix}@example.com`;
     const username = `avatar_${suffix}`;
     const password = 'ExamplePass123!';
 
+
     beforeAll(async () => {
-        const env = process.env;
-
-        if (
-            env.NODE_ENV !== 'test' ||
-            env.DB_HOST !== '127.0.0.1' ||
-            env.DB_PORT !== '3307' ||
-            env.DB_DATABASE !== 'medium_clone_test' ||
-            env.DB_USERNAME !== 'medium_test_user' ||
-            env.REDIS_URL !== 'redis://127.0.0.1:6380' ||
-            !env.DB_TEST_SERVER_UUID
-        ) {
-            throw new Error('Unsafe E2E environment');
-        }
-
-        const { AppModule } = await import(
-            '../src/app.module.js'
+        temporaryRoot = await mkdtemp(
+            path.join(
+                tmpdir(),
+                'medium-clone-avatar-e2e-',
+            ),
         );
 
-        const moduleRef = await Test.createTestingModule({
-            imports: [AppModule],
-        }).compile();
+        const cwdSpy = vi
+            .spyOn(process, 'cwd')
+            .mockReturnValue(temporaryRoot);
 
-        app = moduleRef.createNestApplication();
-
-        app.setGlobalPrefix('api');
-
-        app.useGlobalPipes(
-            new ValidationPipe({
-                whitelist: true,
-                forbidNonWhitelisted: true,
-                transform: true,
-            }),
-        );
-
-        await app.init();
-
-        const rows = (await app.get(DataSource).query(`
-      SELECT
-        DATABASE() AS db,
-        CURRENT_USER() AS dbUser,
-        @@server_uuid AS serverUuid
-    `)) as Array<{
-            db: string;
-            dbUser: string;
-            serverUuid: string;
-        }>;
-
-        const identity = rows[0];
-
-        if (
-            identity?.db !== 'medium_clone_test' ||
-            !identity.dbUser.startsWith('medium_test_user@') ||
-            identity.serverUuid !== env.DB_TEST_SERVER_UUID
-        ) {
-            throw new Error(
-                'E2E database identity verification failed',
-            );
-        }
-
-        databaseVerified = true;
-    }, 25000);
-
-    afterAll(async () => {
-        if (!app) return;
+        let storage: AvatarStorageService;
 
         try {
-            if (databaseVerified && createdUserId) {
-                const dataSource = app.get(DataSource);
-                const attachmentsRepository =
-                    dataSource.getRepository(Attachment);
-
-                // Only inspect attachments owned by this test user.
-                const remainingAttachments =
-                    await attachmentsRepository.find({
-                        where: {
-                            ownerType: 'user',
-                            ownerId: createdUserId,
-                            kind: 'avatar',
-                        },
-                    });
-
-                for (const attachment of remainingAttachments) {
-                    trackedStorageKeys.add(attachment.storageKey);
-                }
-
-                await attachmentsRepository.delete({
-                    ownerType: 'user',
-                    ownerId: createdUserId,
-                    kind: 'avatar',
-                });
-
-                await dataSource.getRepository(User).delete({
-                    id: createdUserId,
-                    email,
-                });
-
-                const storage = app.get(AvatarStorageService);
-
-                // Never delete the entire uploads directory.
-                for (const key of trackedStorageKeys) {
-                    await storage.deleteAvatar(key);
-                }
-            }
+            storage = new AvatarStorageService();
         } finally {
-            await app.close();
+            cwdSpy.mockRestore();
         }
-    }, 20000);
+
+        testApp = await createTestApp({
+            configureModule(builder) {
+                builder
+                    .overrideProvider(
+                        AvatarStorageService,
+                    )
+                    .useValue(storage);
+            },
+        });
+
+        expect(
+            testApp.app.get(AvatarStorageService),
+        ).toBe(storage);
+    });
+
+
+
+    afterAll(async () => {
+        const errors: unknown[] = [];
+
+        if (testApp) {
+            try {
+                await closeTestApp(
+                    testApp,
+                    async ({ db }) => {
+                        const fixtures = [
+                            ...(createdUserId
+                                ? [{ id: createdUserId, email }]
+                                : []),
+                            ...additionalUsers,
+                        ];
+                        const cleanupErrors: unknown[] = [];
+
+                        for (const fixture of fixtures) {
+                            try {
+                                await db.transaction(async (manager) => {
+                                    const usersRepository =
+                                        manager.getRepository(User);
+
+                                    const userExists =
+                                        await usersRepository.existsBy({
+                                            id: fixture.id,
+                                            email: fixture.email,
+                                        });
+
+                                    if (!userExists) {
+                                        throw new Error(
+                                            'Avatar fixture cleanup identity mismatch',
+                                        );
+                                    }
+
+                                    await manager
+                                        .getRepository(Attachment)
+                                        .delete({
+                                            ownerType: 'user',
+                                            ownerId: fixture.id,
+                                            kind: 'avatar',
+                                        });
+
+                                    await usersRepository.delete({
+                                        id: fixture.id,
+                                        email: fixture.email,
+                                    });
+                                });
+                            } catch (error: unknown) {
+                                cleanupErrors.push(error);
+                            }
+                        }
+                        if (cleanupErrors.length > 0) {
+                            throw new AggregateError(
+                                cleanupErrors,
+                                'Avatar fixture cleanup failed',
+                            );
+                        }
+                    },
+                );
+            } catch (error: unknown) {
+                errors.push(error);
+            }
+        }
+
+        if (temporaryRoot) {
+            try {
+                await rm(temporaryRoot, {
+                    recursive: true,
+                    force: true,
+                });
+            } catch (error: unknown) {
+                errors.push(error);
+            }
+        }
+
+        if (errors.length > 0) {
+            throw new AggregateError(
+                errors,
+                'Avatar E2E cleanup failed',
+            );
+        }
+    });
+
+
+    it.each(['replace', 'delete'] as const)(
+        'preserves another user\'s avatar when its owner performs %s',
+        async (operation) => {
+            if (!testApp) throw new Error('Test application is not ready');
+
+            const { app, server, db } = testApp;
+            const alice = await registerUserFixture(testApp, additionalUsers, {
+                prefix: 'avatar_alice',
+            });
+            const bob = await registerUserFixture(testApp, additionalUsers, {
+                prefix: 'avatar_bob',
+            });
+            const storage = app.get(AvatarStorageService);
+            const users = db.getRepository(User);
+            const attachments = db.getRepository(Attachment);
+            const avatarUrl = '/api/user/avatar';
+
+            const makeImage = (background: string) => sharp({
+                create: { width: 64, height: 64, channels: 3, background },
+            }).png().toBuffer();
+            const aliceImage = await makeImage('#cc2211');
+            const bobImage = await makeImage('#1166bb');
+            const replacementImage = await makeImage('#33bb44');
+
+            const aliceUpload = await request(server)
+                .post(avatarUrl)
+                .set('Authorization', alice.authorization)
+                .attach('file', aliceImage, 'alice.png')
+                .expect(201);
+            const bobUpload = await request(server)
+                .post(avatarUrl)
+                .set('Authorization', bob.authorization)
+                .attach('file', bobImage, 'bob.png')
+                .expect(201);
+            const aliceUrl = aliceUpload.body.image as string;
+            const bobUrl = bobUpload.body.image as string;
+            const aliceId = /^\/api\/avatars\/([0-9a-f-]{36})$/i.exec(aliceUrl)?.[1];
+            const bobId = /^\/api\/avatars\/([0-9a-f-]{36})$/i.exec(bobUrl)?.[1];
+            if (!aliceId || !bobId || aliceId === bobId) {
+                throw new Error('Invalid or duplicate avatar IDs');
+            }
+
+            const aliceAttachment = await attachments.findOneByOrFail({
+                id: aliceId, ownerType: 'user', ownerId: alice.id, kind: 'avatar',
+            });
+            const bobAttachment = await attachments.findOneByOrFail({
+                id: bobId, ownerType: 'user', ownerId: bob.id, kind: 'avatar',
+            });
+            const bobBytes = await storage.readAvatar(bobAttachment.storageKey);
+            expect(bobBytes).not.toBeNull();
+            expect((await users.findOneByOrFail({ id: bob.id })).image).toBe(bobId);
+
+            if (operation === 'replace') {
+                const replacement = await request(server)
+                    .post(avatarUrl)
+                    .set('Authorization', alice.authorization)
+                    .attach('file', replacementImage, 'replacement.png')
+                    .expect(201);
+                const replacementId = /^\/api\/avatars\/([0-9a-f-]{36})$/i.exec(
+                    replacement.body.image as string,
+                )?.[1];
+                if (!replacementId) {
+                    throw new Error('Invalid replacement avatar URL');
+                }
+                expect(replacementId).not.toBe(aliceId);
+                expect((await users.findOneByOrFail({ id: alice.id })).image)
+                    .toBe(replacementId);
+                expect(await attachments.findOneBy({
+                    id: replacementId, ownerType: 'user', ownerId: alice.id, kind: 'avatar',
+                })).not.toBeNull();
+            } else {
+                await request(server)
+                    .delete(avatarUrl)
+                    .set('Authorization', alice.authorization)
+                    .expect(204);
+                expect((await users.findOneByOrFail({ id: alice.id })).image).toBeNull();
+            }
+
+            expect(await attachments.findOneBy({ id: aliceId })).toBeNull();
+            expect(await storage.readAvatar(aliceAttachment.storageKey)).toBeNull();
+            await request(server).get(aliceUrl).expect(404);
+
+            expect((await users.findOneByOrFail({ id: bob.id })).image).toBe(bobId);
+            expect(await attachments.findOneByOrFail({ id: bobId })).toMatchObject({
+                ownerType: 'user', ownerId: bob.id, kind: 'avatar',
+                storageKey: bobAttachment.storageKey,
+                sizeBytes: bobAttachment.sizeBytes,
+                visibility: bobAttachment.visibility,
+            });
+            expect(await storage.readAvatar(bobAttachment.storageKey)).toEqual(bobBytes);
+            const publicBob = await request(server)
+                .get(bobUrl)
+                .buffer(true)
+                .expect('Content-Type', /image\/webp/)
+                .expect(200);
+            expect(publicBob.body).toEqual(bobBytes);
+        },
+        40000,
+    );
 
     it('validates the complete avatar lifecycle', async () => {
-        if (!app || !databaseVerified) {
+        if (!testApp) {
             throw new Error('Test application is not ready');
         }
 
-        const server = app.getHttpServer();
-        const dataSource = app.get(DataSource);
+        const {
+            app,
+            server,
+            db: dataSource,
+        } = testApp;
+
         const storage = app.get(AvatarStorageService);
+
         const attachmentsRepository =
             dataSource.getRepository(Attachment);
 
@@ -256,7 +390,6 @@ describe('Avatar E2E', () => {
                 id: firstAttachmentId,
             });
 
-        trackedStorageKeys.add(firstAttachment.storageKey);
 
         expect(firstAttachment).toMatchObject({
             ownerType: 'user',
@@ -364,7 +497,6 @@ describe('Avatar E2E', () => {
                 id: secondAttachmentId,
             });
 
-        trackedStorageKeys.add(secondAttachment.storageKey);
 
         // Old attachment and file must be removed.
         expect(
@@ -469,11 +601,14 @@ describe('Avatar E2E', () => {
             .expect(404);
 
         // 13. Concurrent uploads: only one avatar must survive.
-        const { readdir } = await import('node:fs/promises');
-        const { join } = await import('node:path');
+        if (!temporaryRoot) {
+            throw new Error(
+                'Avatar test storage was not initialized',
+            );
+        }
 
-        const avatarDirectory = join(
-            process.cwd(),
+        const avatarDirectory = path.join(
+            temporaryRoot,
             'uploads',
             'avatars',
         );
@@ -530,10 +665,6 @@ describe('Avatar E2E', () => {
                 ownerId: userId,
                 kind: 'avatar',
             });
-
-        trackedStorageKeys.add(
-            winnerAttachment.storageKey,
-        );
 
         const loserUrl =
             winnerUrl === urlA ? urlB : urlA;
@@ -656,10 +787,6 @@ describe('Avatar E2E', () => {
 
             expect(uploadedUrl).toBe(
                 `/api/avatars/${currentAttachment.id}`,
-            );
-
-            trackedStorageKeys.add(
-                currentAttachment.storageKey,
             );
 
             await request(server)

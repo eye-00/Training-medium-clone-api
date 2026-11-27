@@ -1,12 +1,12 @@
-import {
-    type INestApplication,
-    ValidationPipe,
-    InternalServerErrorException,
-} from '@nestjs/common';
-import { Test } from '@nestjs/testing';
-import { randomUUID } from 'node:crypto';
+
+import { InternalServerErrorException } from '@nestjs/common';
 import request from 'supertest';
-import { DataSource, In, type EntityManager } from 'typeorm';
+
+import {
+    In,
+    type EntityManager,
+} from 'typeorm';
+
 import {
     afterAll,
     beforeAll,
@@ -16,145 +16,81 @@ import {
     vi,
 } from 'vitest';
 
-import { User } from '../src/users/entities/user.entity.js';
 import { Article } from '../src/articles/entities/article.entity.js';
 import { Tag } from '../src/articles/entities/tag.entity.js';
 import { ArticleTag } from '../src/articles/entities/article-tag.entity.js';
-
 import { ArticleFavorite } from '../src/articles/entities/article-favorite.entity.js';
 import { ArticlesService } from '../src/articles/articles.service.js';
 
-describe('Article Concurrency E2E', () => {
-    let app: INestApplication | undefined;
-    let databaseVerified = false;
+import {
+    createTestApp,
+    closeTestApp,
+    type TestAppContext,
+} from './helpers/test-app.helper.js';
 
-    const createdUsers: Array<{ id: string; email: string }> = [];
+import {
+    registerUserFixture,
+    cleanupUserFixtures,
+    type CreatedUser,
+} from './helpers/user-fixture.helper.js';
+
+import {
+    cleanupTagFixtures,
+    makeUniqueTag,
+} from './helpers/article-fixture.helper.js';
+
+describe('Article Concurrency E2E', () => {
+    let testApp: TestAppContext | undefined;
+
+    const createdUsers: CreatedUser[] = [];
     const createdTags = new Set<string>();
-    const suiteSuffix = randomUUID().replaceAll('-', '').slice(0, 8);
-    const password = 'ExamplePass123!';
 
     beforeAll(async () => {
-        const env = process.env;
-
-        if (
-            env.NODE_ENV !== 'test' ||
-            env.DB_HOST !== '127.0.0.1' ||
-            env.DB_PORT !== '3307' ||
-            env.DB_DATABASE !== 'medium_clone_test' ||
-            env.DB_USERNAME !== 'medium_test_user' ||
-            env.REDIS_URL !== 'redis://127.0.0.1:6380' ||
-            !env.DB_TEST_SERVER_UUID
-        ) {
-            throw new Error('Unsafe E2E environment');
-        }
-
-        const { AppModule } = await import('../src/app.module.js');
-        const moduleRef = await Test.createTestingModule({
-            imports: [AppModule],
-        }).compile();
-
-        app = moduleRef.createNestApplication();
-        app.setGlobalPrefix('api');
-        app.useGlobalPipes(
-            new ValidationPipe({
-                whitelist: true,
-                forbidNonWhitelisted: true,
-                transform: true,
-            }),
-        );
-
-        await app.listen(0, '127.0.0.1');
-
-        const rows = (await app.get(DataSource).query(`
-            SELECT
-                DATABASE() AS db,
-                CURRENT_USER() AS dbUser,
-                @@server_uuid AS serverUuid
-        `)) as Array<{
-            db: string;
-            dbUser: string;
-            serverUuid: string;
-        }>;
-
-        const identity = rows[0];
-
-        if (
-            identity?.db !== 'medium_clone_test' ||
-            !identity.dbUser.startsWith('medium_test_user@') ||
-            identity.serverUuid !== env.DB_TEST_SERVER_UUID
-        ) {
-            throw new Error('E2E database identity verification failed');
-        }
-
-        databaseVerified = true;
-    }, 25000);
+        testApp = await createTestApp({
+            listen: true,
+        });
+    });
 
     afterAll(async () => {
-        if (!app) return;
+        if (!testApp) return;
 
-        try {
-            if (databaseVerified) {
-                const db = app.get(DataSource);
+        await closeTestApp(
+            testApp,
+            async ({ db }) => {
+                await cleanupUserFixtures(
+                    db,
+                    createdUsers,
+                );
 
-                // Only remove users registered by this suite.
-                // Their article records and relationships cascade.
-                for (const user of createdUsers) {
-                    await db.getRepository(User).delete({
-                        id: user.id,
-                        email: user.email,
-                    });
-                }
+                await cleanupTagFixtures(
+                    db,
+                    createdTags,
+                );
+            },
+        );
+    });
 
-                // Only remove uniquely generated tags from this suite.
-                if (createdTags.size > 0) {
-                    await db.getRepository(Tag).delete({
-                        name: In([...createdTags]),
-                    });
-                }
-            }
-        } finally {
-            await app.close();
-        }
-    }, 20000);
-
-    function context() {
-        if (!app || !databaseVerified) {
+    function context(): TestAppContext {
+        if (!testApp) {
             throw new Error('Test app is not ready');
         }
-        return {
-            server: app.getHttpServer(),
-            db: app.get(DataSource),
-        };
+
+        return testApp;
     }
 
     function makeTag(prefix: string): string {
-        const value = `${prefix}_${suiteSuffix}_${randomUUID().replaceAll('-', '').slice(0, 10)}`;
-        createdTags.add(value);
-        return value;
+        return makeUniqueTag(
+            createdTags,
+            prefix,
+        );
     }
 
-    async function registerUser() {
-        const { server } = context();
-        const identity = `${suiteSuffix}_${randomUUID().replaceAll('-', '').slice(0, 10)}`;
-        const username = `tx_${identity}`;
-        const email = `${username}@example.com`;
-        const registration = await request(server)
-            .post('/api/users')
-            .send({ email, username, password })
-            .expect(201);
-
-        const id = registration.body.user.id as string;
-        createdUsers.push({ id, email });
-
-        const login = await request(server)
-            .post('/api/users/login')
-            .send({ email, password })
-            .expect(200);
-
-        return {
-            id,
-            authorization: `Bearer ${login.body.accessToken as string}`,
-        };
+    function registerUser() {
+        return registerUserFixture(
+            context(),
+            createdUsers,
+            { prefix: 'tx' },
+        );
     }
 
     type Actor = Awaited<ReturnType<typeof registerUser>>;
@@ -342,7 +278,7 @@ describe('Article Concurrency E2E', () => {
         const tags = f.db.getRepository(Tag);
         expect(await tags.existsBy({ name: rollbackTag })).toBe(false);
         const beforeLinks = (await storedTags(f.saved.id)).links;
-        const service = app!.get(ArticlesService) as unknown as {
+        const service = context().app.get(ArticlesService) as unknown as {
             replaceArticleTags: (manager: EntityManager, articleId: string, names: string[]) => Promise<void>;
         };
         const original = service.replaceArticleTags.bind(service);
@@ -355,12 +291,14 @@ describe('Article Concurrency E2E', () => {
         try {
             const failed = await request(f.server).put(f.url)
                 .set('Authorization', f.owner.authorization)
-                .send({ article: {
-                    title: 'Rollback Modified Article',
-                    description: 'Changed description',
-                    body: 'Changed body',
-                    tagList: [rollbackTag],
-                } })
+                .send({
+                    article: {
+                        title: 'Rollback Modified Article',
+                        description: 'Changed description',
+                        body: 'Changed body',
+                        tagList: [rollbackTag],
+                    }
+                })
                 .expect(500);
             expect(failed.body).toMatchObject({ statusCode: 500, message: 'E2E forced rollback' });
             expect(failurePointReached).toBe(true);

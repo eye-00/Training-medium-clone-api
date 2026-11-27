@@ -138,6 +138,25 @@ describe('AvatarStorageService', () => {
     ).rejects.toBeInstanceOf(BadRequestException);
   });
 
+  it('rejects truncated PNG data even when its metadata is readable', async () => {
+    const png = await sharp({
+      create: {
+        width: 100,
+        height: 100,
+        channels: 3,
+        background: '#399bea',
+      },
+    }).png().toBuffer();
+    const truncated = png.subarray(0, png.length - 20);
+
+    await expect(sharp(truncated, { failOn: 'error' }).metadata())
+      .resolves.toMatchObject({ format: 'png' });
+    await expect(sharp(truncated, { failOn: 'error' }).webp().toBuffer())
+      .rejects.toThrow();
+    await expect(service.saveAvatar(truncated))
+      .rejects.toBeInstanceOf(BadRequestException);
+  });
+
   it('rejects GIF files', async () => {
     const gif = await sharp({
       create: {

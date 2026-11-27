@@ -1,4 +1,4 @@
-import { NotFoundException } from '@nestjs/common';
+import { Logger, NotFoundException } from '@nestjs/common';
 import type { DataSource, EntityManager } from 'typeorm';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -128,6 +128,80 @@ function createTestContext() {
 }
 
 describe('AvatarService.uploadAvatar', () => {
+    it('logs a safe filesystem code without the raw cleanup error', async () => {
+        const logger = vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+        try {
+            const context = createTestContext();
+            const original = new Error('synthetic transaction failure');
+            context.transaction.mockRejectedValue(original);
+            context.deleteAvatar.mockRejectedValue(Object.assign(
+                new Error('SYNTHETIC_PRIVATE_PATH_MARKER'), { code: 'EACCES' },
+            ));
+
+            await expect(context.service.uploadAvatar(USER_ID, file)).rejects.toBe(original);
+            expect(logger).toHaveBeenCalledOnce();
+            const output = JSON.stringify(logger.mock.calls);
+            expect(output).toContain('EACCES');
+            expect(output).not.toContain('SYNTHETIC_PRIVATE_PATH_MARKER');
+            expect(output).not.toContain(NEW_KEY);
+        } finally {
+            logger.mockRestore();
+        }
+    });
+
+    it('does not log an unrecognized cleanup error code or text', async () => {
+        const logger = vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+        try {
+            const context = createTestContext();
+            const original = new Error('synthetic transaction failure');
+            context.transaction.mockRejectedValue(original);
+            context.deleteAvatar.mockRejectedValue(Object.assign(
+                new Error('SYNTHETIC_PRIVATE_ERROR_MARKER'), { code: 'SYNTHETIC_UNTRUSTED_CODE' },
+            ));
+
+            await expect(context.service.uploadAvatar(USER_ID, file)).rejects.toBe(original);
+            const output = JSON.stringify(logger.mock.calls);
+            expect(output).not.toContain('SYNTHETIC_PRIVATE_ERROR_MARKER');
+            expect(output).not.toContain('SYNTHETIC_UNTRUSTED_CODE');
+            expect(output).not.toContain(NEW_KEY);
+        } finally {
+            logger.mockRestore();
+        }
+    });
+
+    it('preserves the original failure even if a cleanup error code getter throws', async () => {
+        const logger = vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+        try {
+            const context = createTestContext();
+            const original = new Error('synthetic transaction failure');
+            context.transaction.mockRejectedValue(original);
+            context.deleteAvatar.mockRejectedValue(Object.defineProperty({}, 'code', {
+                get() { throw new Error('SYNTHETIC_GETTER_MARKER'); },
+            }));
+            await expect(context.service.uploadAvatar(USER_ID, file)).rejects.toBe(original);
+            expect(JSON.stringify(logger.mock.calls)).not.toContain('SYNTHETIC_GETTER_MARKER');
+        } finally {
+            logger.mockRestore();
+        }
+    });
+
+    it('does not log a changing cleanup error code', async () => {
+        const logger = vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+        try {
+            const context = createTestContext();
+            const original = new Error('synthetic transaction failure');
+            context.transaction.mockRejectedValue(original);
+            let reads = 0;
+            context.deleteAvatar.mockRejectedValue(Object.defineProperty({}, 'code', {
+                get() { reads++; return reads === 1 ? 'EACCES' : 'SYNTHETIC_CHANGED_CODE'; },
+            }));
+            await expect(context.service.uploadAvatar(USER_ID, file)).rejects.toBe(original);
+            expect(reads).toBe(1);
+            expect(JSON.stringify(logger.mock.calls)).not.toContain('SYNTHETIC_CHANGED_CODE');
+        } finally {
+            logger.mockRestore();
+        }
+    });
     it('creates attachment and updates user image', async () => {
         const context = createTestContext();
 
@@ -246,6 +320,38 @@ describe('AvatarService.uploadAvatar', () => {
             'committed',
             `deleted:${OLD_KEY}`,
         ]);
+    });
+
+    it('preserves both files when the transaction rejects after its callback completes', async () => {
+        const context = createTestContext();
+        context.user.image = OLD_ID;
+        context.attachmentFind.mockResolvedValue({
+            id: OLD_ID,
+            storageKey: OLD_KEY,
+        });
+        const commitError = new Error('Synthetic commit acknowledgement failure');
+        let callbackCompleted = false;
+        context.transaction.mockImplementation(async (callback) => {
+            await callback(context.manager);
+            callbackCompleted = true;
+            throw commitError;
+        });
+
+        await expect(context.service.uploadAvatar(USER_ID, file)).rejects.toBe(commitError);
+        expect(callbackCompleted).toBe(true);
+        expect(context.attachmentInsert).toHaveBeenCalledOnce();
+        expect(context.userUpdate).toHaveBeenCalledOnce();
+        expect(context.deleteAvatar).not.toHaveBeenCalled();
+    });
+
+    it('cleans the new file if the transaction fails before invoking the callback', async () => {
+        const context = createTestContext();
+        const startError = new Error('Synthetic transaction start failure');
+        context.transaction.mockRejectedValue(startError);
+
+        await expect(context.service.uploadAvatar(USER_ID, file)).rejects.toBe(startError);
+        expect(context.attachmentInsert).not.toHaveBeenCalled();
+        expect(context.deleteAvatar).toHaveBeenCalledExactlyOnceWith(NEW_KEY);
     });
 
     it('returns 404 and cleans new file if user is missing', async () => {

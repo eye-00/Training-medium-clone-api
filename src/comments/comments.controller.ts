@@ -23,6 +23,7 @@ import {
     ApiNoContentResponse,
     ApiParam,
     ApiOperation,
+    ApiServiceUnavailableResponse,
 } from '@nestjs/swagger';
 
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
@@ -48,6 +49,7 @@ import {
 import { CommentIdPipe } from './pipes/comment-id.pipe.js';
 
 @ApiTags('Comments')
+@ApiServiceUnavailableResponse({ description: 'Token revocation check is unavailable when authentication is required or supplied.' })
 @Controller('articles/:slug/comments')
 export class CommentsController {
     constructor(

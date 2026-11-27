@@ -1,11 +1,5 @@
-import {
-    type INestApplication,
-    ValidationPipe,
-} from '@nestjs/common';
-import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
-import { DataSource, In } from 'typeorm';
 import {
     afterAll,
     beforeAll,
@@ -14,149 +8,82 @@ import {
     it,
 } from 'vitest';
 
-import { User } from '../src/users/entities/user.entity.js';
 import { Article } from '../src/articles/entities/article.entity.js';
-import { Tag } from '../src/articles/entities/tag.entity.js';
 import { ArticleFavorite } from '../src/articles/entities/article-favorite.entity.js';
 import { Follow } from '../src/profiles/entities/follow.entity.js';
 
-describe('Article Listing E2E', () => {
-    let app: INestApplication | undefined;
-    let databaseVerified = false;
+import {
+    createTestApp,
+    closeTestApp,
+    type TestAppContext,
+} from './helpers/test-app.helper.js';
 
-    const createdUsers: Array<{ id: string; email: string }> = [];
-    const createdTags = new Set<string>();
-    const suiteSuffix = randomUUID().replaceAll('-', '').slice(0, 8);
-    const password = 'ExamplePass123!';
+import {
+    registerUserFixture,
+    cleanupUserFixtures,
+    type CreatedUser,
+} from './helpers/user-fixture.helper.js';
+
+import {
+    createArticleFixture,
+    cleanupOwnedTagFixtures,
+    createOwnedTagFixture,
+    OwnedTagRegistry,
+} from './helpers/article-fixture.helper.js';
+import { runCleanupStages } from './helpers/cleanup-stages.helper.js';
+
+describe('Article Listing E2E', () => {
+
+    let testApp: TestAppContext | undefined;
+
+    const createdUsers: CreatedUser[] = [];
+    const createdTags = new OwnedTagRegistry();
 
     beforeAll(async () => {
-        const env = process.env;
-
-        if (
-            env.NODE_ENV !== 'test' ||
-            env.DB_HOST !== '127.0.0.1' ||
-            env.DB_PORT !== '3307' ||
-            env.DB_DATABASE !== 'medium_clone_test' ||
-            env.DB_USERNAME !== 'medium_test_user' ||
-            env.REDIS_URL !== 'redis://127.0.0.1:6380' ||
-            !env.DB_TEST_SERVER_UUID
-        ) {
-            throw new Error('Unsafe E2E environment');
-        }
-
-        const { AppModule } = await import('../src/app.module.js');
-        const moduleRef = await Test.createTestingModule({
-            imports: [AppModule],
-        }).compile();
-
-        app = moduleRef.createNestApplication();
-        app.setGlobalPrefix('api');
-        app.useGlobalPipes(
-            new ValidationPipe({
-                whitelist: true,
-                forbidNonWhitelisted: true,
-                transform: true,
-            }),
-        );
-
-        await app.init();
-
-        const rows = (await app.get(DataSource).query(`
-            SELECT
-                DATABASE() AS db,
-                CURRENT_USER() AS dbUser,
-                @@server_uuid AS serverUuid
-        `)) as Array<{
-            db: string;
-            dbUser: string;
-            serverUuid: string;
-        }>;
-
-        const identity = rows[0];
-
-        if (
-            identity?.db !== 'medium_clone_test' ||
-            !identity.dbUser.startsWith('medium_test_user@') ||
-            identity.serverUuid !== env.DB_TEST_SERVER_UUID
-        ) {
-            throw new Error('E2E database identity verification failed');
-        }
-
-        databaseVerified = true;
-    }, 25000);
+        testApp = await createTestApp();
+    });
 
     afterAll(async () => {
-        if (!app) return;
+        if (!testApp) return;
 
-        try {
-            if (databaseVerified) {
-                const db = app.get(DataSource);
+        await closeTestApp(
+            testApp,
+            async ({ db, identity }) => {
+                await runCleanupStages([
+                    () => cleanupUserFixtures(db, createdUsers),
+                    () => cleanupOwnedTagFixtures(db, createdTags, identity.serverUuid),
+                ]);
+            },
+        );
+    });
 
-                // Only remove users registered by this suite.
-                // Their article records and relationships cascade.
-                for (const user of createdUsers) {
-                    await db.getRepository(User).delete({
-                        id: user.id,
-                        email: user.email,
-                    });
-                }
-
-                // Only remove uniquely generated tags from this suite.
-                if (createdTags.size > 0) {
-                    await db.getRepository(Tag).delete({
-                        name: In([...createdTags]),
-                    });
-                }
-            }
-        } finally {
-            await app.close();
-        }
-    }, 20000);
-
-    function context() {
-        if (!app || !databaseVerified) {
+    function context(): TestAppContext {
+        if (!testApp) {
             throw new Error('Test app is not ready');
         }
-        return {
-            server: app.getHttpServer(),
-            db: app.get(DataSource),
-        };
+
+        return testApp;
     }
 
-    function makeTag(prefix: string): string {
-        const value = `${prefix}_${suiteSuffix}_${randomUUID().replaceAll('-', '').slice(0, 10)}`;
-        createdTags.add(value);
-        return value;
+    async function makeTag(prefix: string): Promise<string> {
+        const name = `${prefix}_${randomUUID().replaceAll('-', '')}`;
+        const { db, identity } = context();
+        return (await createOwnedTagFixture(db, createdTags, name, identity.serverUuid)).name;
     }
 
-    async function registerUser() {
-        const { server } = context();
-        const identity = `${suiteSuffix}_${randomUUID().replaceAll('-', '').slice(0, 10)}`;
-        const username = `lst_${identity}`;
-        const email = `${username}@example.com`;
-        const registration = await request(server)
-            .post('/api/users')
-            .send({ email, username, password })
-            .expect(201);
 
-        const id = registration.body.user.id as string;
-        createdUsers.push({ id, email });
-
-        const login = await request(server)
-            .post('/api/users/login')
-            .send({ email, password })
-            .expect(200);
-
-        return {
-            id,
-            username,
-            authorization: `Bearer ${login.body.accessToken as string}`,
-        };
+    function registerUser() {
+        return registerUserFixture(
+            context(),
+            createdUsers,
+            { prefix: 'lst' },
+        );
     }
 
     const url = '/api/articles';
     const getSlugs = (items: Array<{ slug: string }>) =>
         items.map((item) => item.slug);
+
 
     async function createArticle(
         authorization: string,
@@ -164,36 +91,37 @@ describe('Article Listing E2E', () => {
         tagList: string[],
         createdAt: Date,
     ) {
-        const { server, db } = context();
-        const response = await request(server)
-            .post(url)
-            .set('Authorization', authorization)
-            .send({
-                article: {
+        const { db } = context();
+
+        const { saved: article } =
+            await createArticleFixture(
+                context(),
+                authorization,
+                {
                     title,
                     description: `Description of ${title}`,
                     body: `Body content of ${title}`,
                     tagList,
                 },
-            })
-            .expect(201);
+            );
 
-        const articles = db.getRepository(Article);
-        const article = await articles.findOneByOrFail({
-            slug: response.body.article.slug as string,
-        });
-        await articles.update({ id: article.id }, { createdAt });
+        await db.getRepository(Article).update(
+            { id: article.id },
+            { createdAt },
+        );
+
         return article;
     }
+
 
     // Each call creates independent users, tags, articles and viewer state.
     // All exact count/order assertions are scoped to these unique values.
     async function fixture() {
         const { server, db } = context();
-        const scopeTag = makeTag('list_scope');
-        const nestjsTag = makeTag('list_nestjs');
-        const backendTag = makeTag('list_backend');
-        const typescriptTag = makeTag('list_typescript');
+        const scopeTag = await makeTag('list_scope');
+        const nestjsTag = await makeTag('list_nestjs');
+        const backendTag = await makeTag('list_backend');
+        const typescriptTag = await makeTag('list_typescript');
 
         const alice = await registerUser();
         const bob = await registerUser();

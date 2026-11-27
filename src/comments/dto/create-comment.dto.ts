@@ -12,8 +12,7 @@ import { ApiProperty } from '@nestjs/swagger';
 export class CreateCommentFieldsDto {
     @ApiProperty({
         example: 'This is a great article!',
-        minLength: 1,
-        maxLength: 5000,
+        description: 'After trimming, 1–5000 characters.',
     })
     @Transform(({ value }: { value: unknown }) =>
         typeof value === 'string'

@@ -1,7 +1,9 @@
 
 import { Injectable, NotFoundException, BadRequestException, ForbiddenException, InternalServerErrorException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import { DataSource, In, EntityManager, QueryFailedError, } from 'typeorm';
+import { DataSource, In, EntityManager } from 'typeorm';
+
+import { retryOnDeadlock } from '../database/utils/retry-on-deadlock.js';
 
 import type { PublicUserDto } from '../users/dto/register-response.dto.js';
 import { Article } from './entities/article.entity.js';
@@ -32,9 +34,17 @@ function generateSlug(title: string, id: string): string {
         .replace(/[^\p{L}\p{N}]+/gu, '-')
         .replace(/^-+|-+$/g, '')
         .slice(0, 180)
+        // A UTF-16 slice can cut a supplementary letter in half.
+        .replace(/[\uD800-\uDBFF]$/, '')
         .replace(/-+$/g, '');
 
     return `${base || 'article'}-${id}`;
+}
+
+function assertTitleFitsStorage(title: string): void {
+    if (Array.from(title).length > 255) {
+        throw new BadRequestException('Article title must not exceed 255 characters');
+    }
 }
 
 @Injectable()
@@ -48,11 +58,13 @@ export class ArticlesService {
         dto: CreateArticleDto,
     ): Promise<ArticleResponseDto> {
         const input = dto.article;
+        assertTitleFitsStorage(input.title);
+        const tagNames = this.normalizeTagNames(input.tagList ?? []);
         const articleId = randomUUID();
         const slug = generateSlug(input.title, articleId);
 
 
-        return this.retryOnDeadlock(() => this.dataSource.transaction('READ COMMITTED', async (manager) => {
+        return retryOnDeadlock(() => this.dataSource.transaction('READ COMMITTED', async (manager) => {
             const articlesRepository = manager.getRepository(Article);
 
             await articlesRepository.insert({
@@ -68,7 +80,7 @@ export class ArticlesService {
             await this.replaceArticleTags(
                 manager,
                 articleId,
-                input.tagList ?? [],
+                tagNames,
             );
 
             // Build the response from persisted database data.
@@ -194,9 +206,9 @@ export class ArticlesService {
             );
         }
 
-        const tagNames = input.tagList;
+        const rawTagNames = input.tagList;
 
-        return this.retryOnDeadlock(() =>
+        return retryOnDeadlock(() =>
             this.dataSource.transaction(
                 'READ COMMITTED',
                 async (manager): Promise<ArticleResponseDto> => {
@@ -220,6 +232,13 @@ export class ArticlesService {
                             'You can only update your own articles',
                         );
                     }
+
+                    if (input.title !== undefined) {
+                        assertTitleFitsStorage(input.title);
+                    }
+                    const tagNames = rawTagNames === undefined
+                        ? undefined
+                        : this.normalizeTagNames(rawTagNames);
 
                     const updates: Partial<
                         Pick<
@@ -651,22 +670,18 @@ export class ArticlesService {
     private normalizeTagNames(
         rawTagNames: string[],
     ): string[] {
-        return [
-            ...new Set(
-                rawTagNames.map((name) =>
-                    name.trim().toLowerCase(),
-                ),
-            ),
-        ].sort();
+        const normalized = rawTagNames.map((name) => name.trim().toLowerCase());
+        if (normalized.some((name) => Array.from(name).length > 100)) {
+            throw new BadRequestException('Article tag must not exceed 100 characters after normalization');
+        }
+        return [...new Set(normalized)].sort();
     }
 
     private async replaceArticleTags(
         manager: EntityManager,
         articleId: string,
-        rawTagNames: string[],
+        tagNames: string[],
     ): Promise<void> {
-        const tagNames = this.normalizeTagNames(rawTagNames);
-
         const tagsRepository = manager.getRepository(Tag);
         const linksRepository =
             manager.getRepository(ArticleTag);
@@ -716,44 +731,6 @@ export class ArticlesService {
                     tagId,
                 })),
             );
-        }
-    }
-
-
-    private async retryOnDeadlock<T>(
-        operation: () => Promise<T>,
-    ): Promise<T> {
-        const maxAttempts = 3;
-
-        for (let attempt = 1; ; attempt++) {
-            try {
-                return await operation();
-            } catch (error: unknown) {
-                const driverError =
-                    error instanceof QueryFailedError
-                        ? (error.driverError as {
-                            code?: string;
-                            errno?: number;
-                        })
-                        : null;
-
-                const isDeadlock =
-                    driverError?.code === 'ER_LOCK_DEADLOCK' ||
-                    driverError?.errno === 1213;
-
-                if (!isDeadlock || attempt >= maxAttempts) {
-                    throw error;
-                }
-
-                // Short backoff with jitter to reduce
-                // the chance of repeating the collision.
-                const delayMs =
-                    attempt * 30 + Math.floor(Math.random() * 30);
-
-                await new Promise<void>((resolve) => {
-                    setTimeout(resolve, delayMs);
-                });
-            }
         }
     }
 

@@ -1,157 +1,125 @@
-import {
-    type INestApplication,
-    ValidationPipe,
-} from '@nestjs/common';
-import { Test } from '@nestjs/testing';
+
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
-import { DataSource } from 'typeorm';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import {
+    afterAll,
+    beforeAll,
+    describe,
+    expect,
+    it,
+} from 'vitest';
 
-import { User } from '../src/users/entities/user.entity.js';
-import { Article } from '../src/articles/entities/article.entity.js';
 import { Comment } from '../src/comments/entities/comment.entity.js';
 
+import {
+    createTestApp,
+    closeTestApp,
+    type TestAppContext,
+} from './helpers/test-app.helper.js';
+
+import {
+    registerUserFixture,
+    cleanupUserFixtures,
+    type CreatedUser,
+} from './helpers/user-fixture.helper.js';
+
+import {
+    createArticleFixture,
+} from './helpers/article-fixture.helper.js';
+
+import {
+    commentEndpoint as url,
+    createCommentFixture,
+    getComments as buildGetComments,
+} from './helpers/comment-fixture.helper.js';
+
 describe('Comment List E2E', () => {
-    let app: INestApplication | undefined;
-    let databaseVerified = false;
-    const createdUsers: Array<{ id: string; email: string }> = [];
-    const password = 'ExamplePass123!';
+    let testApp: TestAppContext | undefined;
+
+    const createdUsers: CreatedUser[] = [];
 
     beforeAll(async () => {
-        const env = process.env;
-        if (
-            env.NODE_ENV !== 'test' ||
-            env.DB_HOST !== '127.0.0.1' ||
-            env.DB_PORT !== '3307' ||
-            env.DB_DATABASE !== 'medium_clone_test' ||
-            env.DB_USERNAME !== 'medium_test_user' ||
-            env.REDIS_URL !== 'redis://127.0.0.1:6380' ||
-            !env.DB_TEST_SERVER_UUID?.trim()
-        ) {
-            throw new Error('Unsafe E2E environment');
-        }
-
-        const { AppModule } = await import('../src/app.module.js');
-        const moduleRef = await Test.createTestingModule({
-            imports: [AppModule],
-        }).compile();
-        app = moduleRef.createNestApplication();
-        app.setGlobalPrefix('api');
-        app.useGlobalPipes(new ValidationPipe({
-            whitelist: true,
-            forbidNonWhitelisted: true,
-            transform: true,
-        }));
-        await app.init();
-
-        const rows = (await app.get(DataSource).query(`
-            SELECT DATABASE() AS db,
-                   CURRENT_USER() AS dbUser,
-                   @@server_uuid AS serverUuid
-        `)) as Array<{ db: string; dbUser: string; serverUuid: string }>;
-        const identity = rows[0];
-        if (
-            identity?.db !== 'medium_clone_test' ||
-            !identity.dbUser.startsWith('medium_test_user@') ||
-            identity.serverUuid !== env.DB_TEST_SERVER_UUID.trim()
-        ) {
-            throw new Error('E2E database identity verification failed');
-        }
-        databaseVerified = true;
-    }, 25000);
+        testApp = await createTestApp();
+    });
 
     afterAll(async () => {
-        if (!app) return;
-        try {
-            if (databaseVerified) {
-                const db = app.get(DataSource);
-                // Delete only users created by this suite. FK cascades
-                // remove their articles and comments. No tags are seeded.
-                for (const user of createdUsers) {
-                    await db.getRepository(User).delete({
-                        id: user.id,
-                        email: user.email,
-                    });
-                }
-            }
-        } finally {
-            await app.close();
-        }
-    }, 20000);
+        if (!testApp) return;
 
-    function context() {
-        if (!app || !databaseVerified) {
+        await closeTestApp(
+            testApp,
+            async ({ db }) => {
+                await cleanupUserFixtures(
+                    db,
+                    createdUsers,
+                );
+            },
+        );
+    });
+
+    function context(): TestAppContext {
+        if (!testApp) {
             throw new Error('Test app is not ready');
         }
-        return { server: app.getHttpServer(), db: app.get(DataSource) };
+
+        return testApp;
     }
 
-    async function registerUser() {
-        const { server } = context();
-        const username = `cml_${randomUUID().replaceAll('-', '')}`;
-        const email = `${username}@example.com`;
-        const registered = await request(server)
-            .post('/api/users')
-            .send({ email, username, password })
-            .expect(201);
-        const id = registered.body.user.id as string;
-        createdUsers.push({ id, email });
-
-        const login = await request(server)
-            .post('/api/users/login')
-            .send({ email, password })
-            .expect(200);
-        return {
-            id,
-            username,
-            authorization: `Bearer ${login.body.accessToken as string}`,
-        };
+    function registerUser() {
+        return registerUserFixture(
+            context(),
+            createdUsers,
+            { prefix: 'cml' },
+        );
     }
 
-    async function createArticle(authorization: string) {
-        const { server, db } = context();
-        const response = await request(server)
-            .post('/api/articles')
-            .set('Authorization', authorization)
-            .send({ article: {
-                title: 'Comment E2E article',
-                description: 'Comment E2E description',
-                body: 'Comment E2E body',
-                tagList: [],
-            } })
-            .expect(201);
-        return db.getRepository(Article).findOneByOrFail({
-            slug: response.body.article.slug as string,
-        });
-    }
+    async function createArticle(
+        authorization: string,
+    ) {
+        const { saved } =
+            await createArticleFixture(
+                context(),
+                authorization,
+            );
 
-    const url = (slug: string) => `/api/articles/${slug}/comments`;
+        return saved;
+    }
 
     async function fixture() {
         const user = await registerUser();
-        const article = await createArticle(user.authorization);
-        return { user, article, url: url(article.slug) };
+
+        const article = await createArticle(
+            user.authorization,
+        );
+
+        return {
+            user,
+            article,
+            url: url(article.slug),
+        };
     }
 
-    function postComment(endpoint: string, authorization: string, body: string) {
-        return request(context().server)
-            .post(endpoint)
-            .set('Authorization', authorization)
-            .send({ comment: { body } });
+    function createComment(
+        endpoint: string,
+        authorization: string,
+        body: string,
+    ) {
+        return createCommentFixture(
+            context(),
+            endpoint,
+            authorization,
+            body,
+        );
     }
 
-    async function createComment(endpoint: string, authorization: string, body: string) {
-        const response = await postComment(endpoint, authorization, body).expect(201);
-        const id = response.body.comment.id as number;
-        const saved = await context().db.getRepository(Comment).findOneByOrFail({ id });
-        return { saved, response: response.body.comment };
-    }
-
-    function getComments(endpoint: string, authorization?: string) {
-        const req = request(context().server).get(endpoint);
-        if (authorization !== undefined) req.set('Authorization', authorization);
-        return req;
+    function getComments(
+        endpoint: string,
+        authorization?: string,
+    ) {
+        return buildGetComments(
+            context(),
+            endpoint,
+            authorization,
+        );
     }
 
     async function follow(authorization: string, username: string) {
@@ -206,13 +174,15 @@ describe('Comment List E2E', () => {
         const created = await createComment(f.url, commenter.authorization, body);
         const { saved } = created;
         const response = await getComments(f.url).expect(200);
-        expect(response.body).toEqual({ comments: [{
-            id: saved.id,
-            createdAt: saved.createdAt.toISOString(),
-            updatedAt: saved.updatedAt.toISOString(),
-            body,
-            author: { username: commenter.username, bio: null, image: null, following: false },
-        }] });
+        expect(response.body).toEqual({
+            comments: [{
+                id: saved.id,
+                createdAt: saved.createdAt.toISOString(),
+                updatedAt: saved.updatedAt.toISOString(),
+                body,
+                author: { username: commenter.username, bio: null, image: null, following: false },
+            }]
+        });
         expect(response.body.comments[0]).toEqual(created.response);
     });
 
@@ -307,10 +277,12 @@ describe('Comment List E2E', () => {
         expect(before.body.comments[0].author.following).toBe(true);
         await unfollow(f.user.authorization, commenter.username);
         const after = await getComments(f.url, f.user.authorization).expect(200);
-        expect(after.body).toEqual({ comments: [{
-            ...before.body.comments[0],
-            author: { ...before.body.comments[0].author, following: false },
-        }] });
+        expect(after.body).toEqual({
+            comments: [{
+                ...before.body.comments[0],
+                author: { ...before.body.comments[0].author, following: false },
+            }]
+        });
         expect(await db.getRepository(Comment).findOneByOrFail({ id: created.saved.id })).toEqual(created.saved);
     });
 });

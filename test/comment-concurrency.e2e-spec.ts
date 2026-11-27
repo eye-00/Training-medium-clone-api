@@ -1,177 +1,181 @@
-import {
-    type INestApplication,
-    ValidationPipe,
-    InternalServerErrorException,
-} from '@nestjs/common';
-import { Test } from '@nestjs/testing';
-import { randomUUID } from 'node:crypto';
+import { InternalServerErrorException } from '@nestjs/common';
 import request from 'supertest';
-import { DataSource, QueryFailedError } from 'typeorm';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
-import { User } from '../src/users/entities/user.entity.js';
+import {
+    QueryFailedError,
+    Repository,
+    type ObjectLiteral,
+} from 'typeorm';
+
+import {
+    afterAll,
+    beforeAll,
+    describe,
+    expect,
+    it,
+    vi,
+} from 'vitest';
+
+import type { User } from '../src/users/entities/user.entity.js';
 import { Article } from '../src/articles/entities/article.entity.js';
 import { Comment } from '../src/comments/entities/comment.entity.js';
 import { CommentsService } from '../src/comments/comments.service.js';
 import type { CommentDetailsDto } from '../src/comments/dto/comment-response.dto.js';
 
+import {
+    createTestApp,
+    closeTestApp,
+    type TestAppContext,
+} from './helpers/test-app.helper.js';
+
+import {
+    registerUserFixture,
+    cleanupUserFixtures,
+    type CreatedUser,
+} from './helpers/user-fixture.helper.js';
+
+import {
+    createArticleFixture,
+} from './helpers/article-fixture.helper.js';
+
+import {
+    commentEndpoint as url,
+    createCommentFixture,
+    postComment as buildPostComment,
+    getComments as buildGetComments,
+    deleteComment as buildDeleteComment,
+} from './helpers/comment-fixture.helper.js';
+
 describe('Comment Concurrency E2E', () => {
-    let app: INestApplication | undefined;
-    let databaseVerified = false;
-    const createdUsers: Array<{ id: string; email: string }> = [];
-    const password = 'ExamplePass123!';
+    let testApp: TestAppContext | undefined;
+
+    const createdUsers: CreatedUser[] = [];
 
     beforeAll(async () => {
-        const env = process.env;
-        if (
-            env.NODE_ENV !== 'test' ||
-            env.DB_HOST !== '127.0.0.1' ||
-            env.DB_PORT !== '3307' ||
-            env.DB_DATABASE !== 'medium_clone_test' ||
-            env.DB_USERNAME !== 'medium_test_user' ||
-            env.REDIS_URL !== 'redis://127.0.0.1:6380' ||
-            !env.DB_TEST_SERVER_UUID?.trim()
-        ) {
-            throw new Error('Unsafe E2E environment');
-        }
-
-        const { AppModule } = await import('../src/app.module.js');
-        const moduleRef = await Test.createTestingModule({
-            imports: [AppModule],
-        }).compile();
-        app = moduleRef.createNestApplication();
-        app.setGlobalPrefix('api');
-        app.useGlobalPipes(new ValidationPipe({
-            whitelist: true,
-            forbidNonWhitelisted: true,
-            transform: true,
-        }));
-        await app.listen(0, '127.0.0.1');
-
-        const rows = (await app.get(DataSource).query(`
-            SELECT DATABASE() AS db,
-                   CURRENT_USER() AS dbUser,
-                   @@server_uuid AS serverUuid
-        `)) as Array<{ db: string; dbUser: string; serverUuid: string }>;
-        const identity = rows[0];
-        if (
-            identity?.db !== 'medium_clone_test' ||
-            !identity.dbUser.startsWith('medium_test_user@') ||
-            identity.serverUuid !== env.DB_TEST_SERVER_UUID.trim()
-        ) {
-            throw new Error('E2E database identity verification failed');
-        }
-        databaseVerified = true;
-    }, 25000);
+        testApp = await createTestApp({
+            listen: true,
+        });
+    });
 
     afterAll(async () => {
-        if (!app) return;
-        try {
-            if (databaseVerified) {
-                const db = app.get(DataSource);
-                // Delete only users created by this suite. FK cascades
-                // remove their articles and comments. No tags are seeded.
-                for (const user of createdUsers) {
-                    await db.getRepository(User).delete({
-                        id: user.id,
-                        email: user.email,
-                    });
-                }
-            }
-        } finally {
-            await app.close();
-        }
-    }, 20000);
+        if (!testApp) return;
 
-    function context() {
-        if (!app || !databaseVerified) {
+        await closeTestApp(
+            testApp,
+            async ({ db }) => {
+                await cleanupUserFixtures(
+                    db,
+                    createdUsers,
+                );
+            },
+        );
+    });
+
+    function context(): TestAppContext {
+        if (!testApp) {
             throw new Error('Test app is not ready');
         }
-        return { server: app.getHttpServer(), db: app.get(DataSource) };
+
+        return testApp;
     }
 
-    async function registerUser() {
-        const { server } = context();
-        const username = `cmc_${randomUUID().replaceAll('-', '')}`;
-        const email = `${username}@example.com`;
-        const registered = await request(server)
-            .post('/api/users')
-            .send({ email, username, password })
-            .expect(201);
-        const id = registered.body.user.id as string;
-        createdUsers.push({ id, email });
-
-        const login = await request(server)
-            .post('/api/users/login')
-            .send({ email, password })
-            .expect(200);
-        return {
-            id,
-            username,
-            authorization: `Bearer ${login.body.accessToken as string}`,
-        };
+    function registerUser() {
+        return registerUserFixture(
+            context(),
+            createdUsers,
+            { prefix: 'cmc' },
+        );
     }
 
-    async function createArticle(authorization: string) {
-        const { server, db } = context();
-        const response = await request(server)
-            .post('/api/articles')
-            .set('Authorization', authorization)
-            .send({ article: {
-                title: 'Comment E2E article',
-                description: 'Comment E2E description',
-                body: 'Comment E2E body',
-                tagList: [],
-            } })
-            .expect(201);
-        return db.getRepository(Article).findOneByOrFail({
-            slug: response.body.article.slug as string,
-        });
-    }
+    async function createArticle(
+        authorization: string,
+    ) {
+        const { saved } =
+            await createArticleFixture(
+                context(),
+                authorization,
+            );
 
-    const url = (slug: string) => `/api/articles/${slug}/comments`;
+        return saved;
+    }
 
     async function fixture() {
         const user = await registerUser();
-        const article = await createArticle(user.authorization);
-        return { user, article, url: url(article.slug) };
+
+        const article = await createArticle(
+            user.authorization,
+        );
+
+        return {
+            user,
+            article,
+            url: url(article.slug),
+        };
     }
 
-    function postComment(endpoint: string, authorization: string, body: string) {
-        return request(context().server)
-            .post(endpoint)
-            .set('Authorization', authorization)
-            .send({ comment: { body } });
+    function postComment(
+        endpoint: string,
+        authorization: string,
+        body: string,
+    ) {
+        return buildPostComment(
+            context(),
+            endpoint,
+            authorization,
+            body,
+        );
     }
 
-    async function createComment(endpoint: string, authorization: string, body: string) {
-        const response = await postComment(endpoint, authorization, body).expect(201);
-        const id = response.body.comment.id as number;
-        const saved = await context().db.getRepository(Comment).findOneByOrFail({ id });
-        return { saved, response: response.body.comment };
+    function createComment(
+        endpoint: string,
+        authorization: string,
+        body: string,
+    ) {
+        return createCommentFixture(
+            context(),
+            endpoint,
+            authorization,
+            body,
+        );
     }
 
-    function getComments(endpoint: string, authorization?: string) {
-        const req = request(context().server).get(endpoint);
-        if (authorization !== undefined) req.set('Authorization', authorization);
-        return req;
+    function getComments(
+        endpoint: string,
+        authorization?: string,
+    ) {
+        return buildGetComments(
+            context(),
+            endpoint,
+            authorization,
+        );
     }
 
-    function deleteComment(endpoint: string, id: number | string, authorization?: string) {
-        const req = request(context().server).delete(`${endpoint}/${id}`);
-        if (authorization !== undefined) req.set('Authorization', authorization);
-        return req;
+    function deleteComment(
+        endpoint: string,
+        id: number | string,
+        authorization?: string,
+    ) {
+        return buildDeleteComment(
+            context(),
+            endpoint,
+            id,
+            authorization,
+        );
     }
 
-    function deleteArticle(slug: string, authorization: string) {
+    function deleteArticle(
+        slug: string,
+        authorization: string,
+    ) {
         return request(context().server)
             .delete(`/api/articles/${slug}`)
             .set('Authorization', authorization);
     }
 
     function mappingTarget() {
-        if (!app) throw new Error('Test app is not ready');
-        return app.get(CommentsService) as unknown as {
+        return context().app.get(
+            CommentsService,
+        ) as unknown as {
             toCommentDetails: (
                 comment: Comment,
                 author: User,
@@ -186,6 +190,95 @@ describe('Comment Concurrency E2E', () => {
             { code: 'ER_LOCK_DEADLOCK', errno: 1213 },
         ));
     }
+
+    function injectDeleteFailure(
+        targetId: number,
+        errorForAttempt: (attempt: number) => Error | undefined,
+    ) {
+        // Preserve the original method before installing the spy.
+        // Its repository context is explicitly restored using .call(this, criteria).
+        // oxlint-disable-next-line typescript/unbound-method
+        const originalDelete = Repository.prototype.delete;
+
+        const observations: Array<{
+            affected: number | null | undefined;
+            transactionActive: boolean;
+            existsAfterDelete: boolean;
+        }> = [];
+
+        const spy = vi
+            .spyOn(Repository.prototype, 'delete')
+            .mockImplementation(async function (
+                this: Repository<ObjectLiteral>,
+                criteria,
+            ) {
+                const result = await originalDelete.call(
+                    this,
+                    criteria,
+                );
+
+                // Only inject failures into DELETE operations
+                // targeting the specific comment under test.
+                if (
+                    this.metadata.target !== Comment ||
+                    typeof criteria !== 'object' ||
+                    criteria === null ||
+                    !('id' in criteria) ||
+                    criteria.id !== targetId
+                ) {
+                    return result;
+                }
+
+                const transactionActive =
+                    this.manager.queryRunner
+                        ?.isTransactionActive === true;
+
+                const existsAfterDelete = await this.manager
+                    .getRepository(Comment)
+                    .existsBy({ id: targetId });
+
+                observations.push({
+                    affected: result.affected,
+                    transactionActive,
+                    existsAfterDelete,
+                });
+
+                const error = errorForAttempt(
+                    observations.length,
+                );
+
+                if (error) {
+                    throw error;
+                }
+
+                return result;
+            });
+
+        return {
+            spy,
+            observations,
+        };
+    }
+
+    function expectDeleteAttempts(
+        observations: Array<{
+            affected: number | null | undefined;
+            transactionActive: boolean;
+            existsAfterDelete: boolean;
+        }>,
+        expectedAttempts: number,
+    ) {
+        expect(observations).toHaveLength(expectedAttempts);
+
+        for (const observation of observations) {
+            expect(observation).toEqual({
+                affected: 1,
+                transactionActive: true,
+                existsAfterDelete: false,
+            });
+        }
+    }
+
 
     it('persists all ten concurrent creates without duplicate IDs or lost comments', async () => {
         const f = await fixture();
@@ -325,4 +418,184 @@ describe('Comment Concurrency E2E', () => {
             spy.mockRestore();
         }
     }, 30000);
+
+    it('retries the whole delete transaction after an injected deadlock following DELETE', async () => {
+        const f = await fixture();
+
+        const target = await createComment(
+            f.url,
+            f.user.authorization,
+            'Delete with retry',
+        );
+
+        const sibling = await createComment(
+            f.url,
+            f.user.authorization,
+            'Preserved sibling',
+        );
+
+        const { spy, observations } = injectDeleteFailure(
+            target.saved.id,
+            attempt => attempt === 1
+                ? deadlockError()
+                : undefined,
+        );
+
+        try {
+            const response = await deleteComment(
+                f.url,
+                target.saved.id,
+                f.user.authorization,
+            ).expect(204);
+
+            expect(response.text).toBe('');
+
+            expectDeleteAttempts(observations, 2);
+        } finally {
+            spy.mockRestore();
+        }
+
+        const repository = context()
+            .db.getRepository(Comment);
+
+        expect(
+            await repository.existsBy({
+                id: target.saved.id,
+            }),
+        ).toBe(false);
+
+        expect(
+            await repository.findOneByOrFail({
+                id: sibling.saved.id,
+            }),
+        ).toEqual(sibling.saved);
+
+        expect(
+            await repository.countBy({
+                articleId: f.article.id,
+            }),
+        ).toBe(1);
+
+        // The deletion has been committed.
+        await deleteComment(
+            f.url,
+            target.saved.id,
+            f.user.authorization,
+        ).expect(404);
+    }, 30000);
+
+    it('stops after three deadlock attempts and rolls back every attempted deletion', async () => {
+        const f = await fixture();
+
+        const target = await createComment(
+            f.url,
+            f.user.authorization,
+            'Must survive all deadlocks',
+        );
+
+        const sibling = await createComment(
+            f.url,
+            f.user.authorization,
+            'Preserved sibling',
+        );
+
+        const { spy, observations } = injectDeleteFailure(
+            target.saved.id,
+            () => deadlockError(),
+        );
+
+        try {
+            await deleteComment(
+                f.url,
+                target.saved.id,
+                f.user.authorization,
+            ).expect(500);
+
+            expectDeleteAttempts(observations, 3);
+        } finally {
+            spy.mockRestore();
+        }
+
+        const repository = context()
+            .db.getRepository(Comment);
+
+        expect(
+            await repository.findOneByOrFail({
+                id: target.saved.id,
+            }),
+        ).toEqual(target.saved);
+
+        expect(
+            await repository.findOneByOrFail({
+                id: sibling.saved.id,
+            }),
+        ).toEqual(sibling.saved);
+
+        expect(
+            await repository.countBy({
+                articleId: f.article.id,
+            }),
+        ).toBe(2);
+    }, 30000);
+
+    it('rolls back a non-deadlock failure without retrying the delete transaction', async () => {
+        const f = await fixture();
+
+        const target = await createComment(
+            f.url,
+            f.user.authorization,
+            'Must survive ordinary failure',
+        );
+
+        const sibling = await createComment(
+            f.url,
+            f.user.authorization,
+            'Preserved sibling',
+        );
+
+        const { spy, observations } = injectDeleteFailure(
+            target.saved.id,
+            () => new InternalServerErrorException(
+                'E2E forced delete rollback',
+            ),
+        );
+
+        try {
+            const response = await deleteComment(
+                f.url,
+                target.saved.id,
+                f.user.authorization,
+            ).expect(500);
+
+            expect(response.body.message).toBe(
+                'E2E forced delete rollback',
+            );
+
+            expectDeleteAttempts(observations, 1);
+        } finally {
+            spy.mockRestore();
+        }
+
+        const repository = context()
+            .db.getRepository(Comment);
+
+        expect(
+            await repository.findOneByOrFail({
+                id: target.saved.id,
+            }),
+        ).toEqual(target.saved);
+
+        expect(
+            await repository.findOneByOrFail({
+                id: sibling.saved.id,
+            }),
+        ).toEqual(sibling.saved);
+
+        expect(
+            await repository.countBy({
+                articleId: f.article.id,
+            }),
+        ).toBe(2);
+    }, 30000);
+
 });

@@ -60,6 +60,40 @@ describe('UsersService.register', () => {
         expect(insert).not.toHaveBeenCalled();
     });
 
+    it.each([
+        ['two ASCII characters', 'a'.repeat(2)],
+        ['101 ASCII characters', 'a'.repeat(101)],
+        ['two emoji', '😀'.repeat(2)],
+        ['101 emoji', '😀'.repeat(101)],
+        ['two variation sequences', '✈️'.repeat(2)],
+        ['51 variation sequences', '✈️'.repeat(51)],
+        ['100 variation sequences', '✈️'.repeat(100)],
+    ])('rejects username with %s without inserting', async (_label, username) => {
+        const { service, insert } = createTestContext();
+
+        await expect(service.register({ ...validDto, username }))
+            .rejects.toBeInstanceOf(BadRequestException);
+        expect(insert).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        ['three ASCII characters', 'a'.repeat(3)],
+        ['100 ASCII characters', 'a'.repeat(100)],
+        ['three emoji', '😀'.repeat(3)],
+        ['50 emoji', '😀'.repeat(50)],
+        ['51 emoji', '😀'.repeat(51)],
+        ['100 emoji', '😀'.repeat(100)],
+        ['three variation sequences', '✈️'.repeat(3)],
+        ['50 variation sequences', '✈️'.repeat(50)],
+    ])('accepts username with %s', async (_label, username) => {
+        const { service, insert } = createTestContext();
+
+        const result = await service.register({ ...validDto, username });
+
+        expect(result.user.username).toBe(username);
+        expect(insert).toHaveBeenCalledOnce();
+    });
+
     it('returns ConflictException for duplicate database keys', async () => {
         const { service, insert } = createTestContext();
 
@@ -136,6 +170,30 @@ function createProfileTestContext() {
 }
 
 describe('UsersService.updateProfile', () => {
+    it.each([
+        ['two emoji', '😀'.repeat(2)],
+        ['51 variation sequences', '✈️'.repeat(51)],
+        ['100 variation sequences', '✈️'.repeat(100)],
+    ])('rejects username with %s without updating', async (_label, username) => {
+        const { service, user, update } = createProfileTestContext();
+
+        await expect(service.updateProfile(user.id, { username }))
+            .rejects.toBeInstanceOf(BadRequestException);
+        expect(update).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        ['100 emoji', '😀'.repeat(100)],
+        ['50 variation sequences', '✈️'.repeat(50)],
+    ])('accepts username with %s', async (_label, username) => {
+        const { service, user, update } = createProfileTestContext();
+
+        const result = await service.updateProfile(user.id, { username });
+
+        expect(result.username).toBe(username);
+        expect(update).toHaveBeenCalledOnce();
+    });
+
     it('updates username without changing bio', async () => {
         const { service, user, update } =
             createProfileTestContext();
